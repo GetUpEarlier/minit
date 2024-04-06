@@ -3,14 +3,17 @@ from typing import Tuple
 from ..core.tensor import Tensor
 from ..core.dispatch import dispatch
 from ..operator.index import Slice, SliceSet, Index, IndexSet, Split, Tie
+from .utils import _convert_scalar
 
 
 def slice(x: Tensor, start: Tensor, stop: Tensor, axis: int):
+    start, stop = _convert_scalar(start, stop)
     (z,) = dispatch(Slice(axis=axis), x, start, stop)
     return z
 
 
 def slice_set(x: Tensor, start: Tensor, stop: Tensor, axis: int, value: Tensor):
+    start, stop = _convert_scalar(start, stop)
     (z,) = dispatch(SliceSet(axis=axis), x, start, stop, value)
     return z
 
@@ -26,6 +29,7 @@ def index_set(x: Tensor, index: Tensor, axis: int, value: Tensor):
 
 
 def split(x: Tensor, axis: int, sizes: Tuple[Tensor, ...]) -> Tuple[Tensor, ...]:
+    sizes = _convert_scalar(*sizes)
     from .arith import constant
     zs = []
     offset = 0

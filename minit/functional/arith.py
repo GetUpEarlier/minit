@@ -1,30 +1,37 @@
 from numbers import Number
+from typing import Union
 from ..core.tensor import Tensor
 from ..core.dispatch import dispatch
 from ..operator.arith import Add, Constant, Cosine, Exponential, Power, Sine, Subtract, Multiply, Divide
+from .utils import _broadcast_scalar
 
 
 def add(x: Tensor, y: Tensor):
+    x, y = _broadcast_scalar(x, y)
     (z,) = dispatch(Add(), x, y)
     return z
 
 
 def subtract(x: Tensor, y: Tensor):
+    x, y = _broadcast_scalar(x, y)
     (z,) = dispatch(Subtract(), x, y)
     return z
 
 
 def multiply(x: Tensor, y: Tensor):
+    x, y = _broadcast_scalar(x, y)
     (z,) = dispatch(Multiply(), x, y)
     return z
 
 
 def divide(x: Tensor, y: Tensor):
+    x, y = _broadcast_scalar(x, y)
     (z,) = dispatch(Divide(), x, y)
     return z
 
 
 def power(base: Tensor, exponent: Tensor):
+    base, exponent = _broadcast_scalar(base, exponent)
     (z,) = dispatch(Power(), base, exponent)
     return z
 

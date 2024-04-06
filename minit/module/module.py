@@ -31,3 +31,6 @@ class Module(Generic[_Parent]):
         for module_name, child in self.children.items():
             for name, buffer in child.named_buffers():
                 yield module_name + "." + name, buffer
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)

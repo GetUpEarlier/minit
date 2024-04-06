@@ -1,6 +1,7 @@
 from typing import Tuple
+from .array import Array
 
-class Tensor:
+class Tensor(Array["Tensor"]):
     @property
     def shape(self) -> Tuple[int, ...]:
         ...

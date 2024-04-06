@@ -40,54 +40,31 @@ def silu(x: Tensor) -> Tensor:
 @nvtx.annotate("rope")
 def rope(x: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor) -> Tensor:
     assert len(x.shape) == 4
-    precomp_freqs_cos = broadcast(add_axis(precomp_freqs_cos, 0), 0, constant(x.shape[0]))
-    precomp_freqs_cos = broadcast(add_axis(precomp_freqs_cos, 2), 2, constant(x.shape[2]))
-    precomp_freqs_cos = add_axis(precomp_freqs_cos, 4)
-    precomp_freqs_sin = broadcast(add_axis(precomp_freqs_sin, 0), 0, constant(x.shape[0]))
-    precomp_freqs_sin = broadcast(add_axis(precomp_freqs_sin, 2), 2, constant(x.shape[2]))
-    precomp_freqs_sin = add_axis(precomp_freqs_sin, 4)
+    precomp_freqs_cos = precomp_freqs_cos.add_axis(0, x.shape[0])
+    precomp_freqs_cos = precomp_freqs_cos.add_axis(2, x.shape[2])
+    precomp_freqs_cos = precomp_freqs_cos.add_axis(4)
+    precomp_freqs_sin = precomp_freqs_sin.add_axis(0, x.shape[0])
+    precomp_freqs_sin = precomp_freqs_sin.add_axis(2, x.shape[2])
+    precomp_freqs_sin = precomp_freqs_sin.add_axis(4)
     shape = x.shape
     head_size = shape[3]
-    x_real, x_imag = split(expand(x, 3, [constant(head_size // 2), constant(2)]), 4, sizes=[constant(1), constant(1)])
-    x_real, x_imag = subtract(multiply(x_real, precomp_freqs_cos), multiply(x_imag, precomp_freqs_sin)), add(multiply(x_imag, precomp_freqs_cos), multiply(x_real, precomp_freqs_sin))
+    x_real, x_imag = x.expand(3, [head_size // 2, 2]).split(4, sizes=[1, 1])
+    x_real, x_imag = x_real * precomp_freqs_cos - x_imag * precomp_freqs_sin,  x_imag * precomp_freqs_cos + x_real * precomp_freqs_sin
     x = tie((x_real, x_imag), axis=4)
     x = fold(x, 3, 5)
     assert x.shape == shape
     return x
 
 def rms_norm(x: Tensor, axis: int, eps: float) -> Tensor:
-    output = divide(
-        x,
-        square_root(
-            add(
-                broadcast(
-                    mean(
-                        square(
-                            x
-                        ),
-                        axis
-                    ),
-                    axis,
-                    constant(x.shape[axis])
-                ),
-                fill(eps, x.shape, x.dtype),
-            )
-        ),
-    )
-    return output
+    ms = x.square().mean(axis).broadcast(axis, x.shape[axis])
+    rms = (ms + eps).square_root()
+    return x / rms
 
 @nvtx.annotate("softmax")
 def softmax(x: Tensor, axis: int) -> Tensor:
-    max_x = broadcast(max(x, axis), axis, constant(x.shape[axis]))
-    x_sub_max_x = subtract(x, max_x)
-    exp_x_sub_max_x = exponential(x_sub_max_x)
-    result = divide(
-        exp_x_sub_max_x,
-        broadcast(sum(
-            exp_x_sub_max_x,
-            axis
-        ), axis, constant(x.shape[axis]))
-    )
+    max_x = x.max(axis).broadcast(axis, x.shape[axis])
+    exp_x_sub_max_x = (x - max_x).exponential()
+    result = exp_x_sub_max_x / exp_x_sub_max_x.sum(axis).broadcast(axis, x.shape[axis])
     return result
 
 class Attention(Module):
@@ -114,43 +91,43 @@ class Attention(Module):
         assert len(x.shape) == 3
         q = matrix_multiply(x, self.q_projection)
         # b, s, h
-        q = expand(q, 2, [
-            constant(self.nr_querys),
-            constant(self.head_size),
+        q = q.expand(2, [
+            self.nr_querys,
+            self.head_size,
         ])
         # b, s, nr_heads, head_size
         k = matrix_multiply(x, self.k_projection)
-        k = expand(k, 2, [
-            constant(nr_key_values // 2),
-            constant(self.head_size),
+        k = k.expand(2, [
+            nr_key_values // 2,
+            self.head_size,
         ])
         v = matrix_multiply(x, self.v_projection)
-        v = expand(v, 2, [
-            constant(nr_key_values // 2),
-            constant(self.head_size),
+        v = v.expand(2, [
+            nr_key_values // 2,
+            self.head_size,
         ])
-        k = repeat_interleaved(k, 2, constant(self.nr_groups)) # b, s, nr_heads, head_size
-        v = repeat_interleaved(v, 2, constant(self.nr_groups))
+        k = k.repeat_interleaved(2, self.nr_groups) # b, s, nr_heads, head_size
+        v = v.repeat_interleaved(2, self.nr_groups)
         # b, s, nr_heads, head_size
         q = rope(q, precomp_freqs_cos, precomp_freqs_sin)
         k = rope(k, precomp_freqs_cos, precomp_freqs_sin)
         # b, s, nr_heads, head_size
-        q = transpose(q, 1, 2)
-        k = transpose(k, 1, 2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
         # b, nr_heads, s, head_size
         qk = batch_matrix_multiply(q, k)
         # b, nr_heads, s, s
-        qk = divide(qk, fill(math.sqrt(self.head_size), qk.shape, qk.dtype)) # b, nr_heads, s, s
-        qk = add(qk, triangle_upper(fill(-math.inf, qk.shape, qk.dtype), diagonal=1))
-        v = transpose(v, 1, 2)
-        v = transpose(v, 2, 3)
+        qk = qk / math.sqrt(self.head_size) # b, nr_heads, s, s
+        qk = qk + triangle_upper(fill(-math.inf, qk.shape, qk.dtype), diagonal=1)
+        v = v.transpose(1, 2)
+        v = v.transpose(2, 3)
         # b, nr_heads, head_size, s
         qk_softmax = softmax(qk, 3)
         output = batch_matrix_multiply(qk_softmax, v)
         # b, nr_heads, s, head_size
-        output = transpose(output, 1, 2)
+        output = output.transpose(1, 2)
         # b, s, nr_heads, head_size
-        output = fold(output, 2, 4)
+        output = output.fold(2, 4)
         # b, s, h
         output = matrix_multiply(output, self.output_projection)
         return output
@@ -167,7 +144,7 @@ class FeedForward(Module):
     def forward(self, x: Tensor):
         output0 = silu(matrix_multiply(x, self.weight0))
         output1 = matrix_multiply(x, self.weight2)
-        output2 = matrix_multiply(multiply(output0, output1), self.weight1)
+        output2 = matrix_multiply(output0 * output1, self.weight1)
         return output2
     
 
@@ -180,9 +157,9 @@ class RMSNorm(Module):
     def forward(self, x: Tensor):
         weight = self.weight
         while len(weight.shape) < len(x.shape):
-            weight = broadcast(add_axis(weight, 0), 0, constant(x.shape[-1-len(weight.shape)]))
+            weight = weight.add_axis(0, x.shape[-1-len(weight.shape)])
         axis = len(x.shape) - 1
-        return multiply(rms_norm(x, axis, 1e-5), weight)
+        return rms_norm(x, axis, 1e-5) * weight
 
 
 class TransformerBlock(Module):
@@ -200,9 +177,9 @@ class TransformerBlock(Module):
 
     @nvtx.annotate("layer")
     def forward(self, x: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor):
-        attention_output = self.attention.forward(self.attention_norm.forward(x), precomp_freqs_cos, precomp_freqs_sin)
-        ffn_output = self.ffn.forward(self.ffn_norm.forward(add(attention_output, x)))
-        return add(add(attention_output, x), ffn_output)
+        attention_output = x + self.attention.forward(self.attention_norm.forward(x), precomp_freqs_cos, precomp_freqs_sin)
+        ffn_output = self.ffn.forward(self.ffn_norm.forward(attention_output))
+        return attention_output + ffn_output
 
 
 class Embedding(Module):
@@ -213,9 +190,9 @@ class Embedding(Module):
     # [B, S] . [W, H] -> [B, S, H]
     @nvtx.annotate("embedding.forward")
     def forward(self, x: Tensor) -> Tensor:
-        flatten_x = fold(x, 0, len(x.shape))
-        output = index(self.weight, flatten_x, 0)
-        return expand(output, 0, list(map(constant, x.shape)))
+        flatten_x = x.fold(0, len(x.shape))
+        output = self.weight.index(flatten_x, 0)
+        return output.expand(0, x.shape)
 
     # [B, S, H] . [W, H] -> [B, S, W]
     @nvtx.annotate("embedding.backward")
@@ -241,19 +218,19 @@ class LlaMa2(Module):
         self.freqs_cos, self.freqs_sin = self.precompute_freqs(head_size, 1024, 1e6)
 
     def precompute_freqs(self, dim: int, size: int, theta: float) -> Tuple[Tensor, Tensor]:
-        freqs = divide(fill(1.0, (dim//2,), "float32"), power(fill(theta, (dim//2,), "float32"), generate_sequence(constant(0), constant(dim//2), constant(2/dim))))
-        freqs = add_axis(freqs, 1)
-        t = generate_sequence(constant(0), constant(size), constant(1))
-        t = add_axis(t, 1)
+        freqs = fill(1.0, (dim//2,), "float32") / fill(theta, (dim//2,), "float32") ** generate_sequence(0, dim//2, 2/dim)
+        freqs = freqs.add_axis(1)
+        t = generate_sequence(0, size, 1)
+        t = t.add_axis(1)
         freqs = matrix_multiply(t, freqs)
-        return cosine(freqs), sine(freqs)
+        return freqs.cosine(), freqs.sine()
 
     @nvtx.annotate("llama")
     def forward(self, input_ids: Tensor):
         _b, s = input_ids.shape[:2]
         states = self.input_embedding.forward(input_ids)
-        freqs_cos = slice(self.freqs_cos, constant(0), constant(s), 0)
-        freqs_sin = slice(self.freqs_sin, constant(0), constant(s), 0)
+        freqs_cos = self.freqs_cos.slice(0, s, 0)
+        freqs_sin = self.freqs_sin.slice(0, s, 0)
         all_states = []
         for _i, block in enumerate(self.layers):
             all_states.append(states)
