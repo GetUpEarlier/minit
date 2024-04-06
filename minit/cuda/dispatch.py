@@ -117,8 +117,8 @@ def register_reduce_operators():
             kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(z.data_ptr), ctypes.c_size_t(a), ctypes.c_size_t(b), ctypes.c_size_t(c))
             return (z,)
     for op_type, op_name, op_init, op_expr in [
-        (Sum, "sum", "0", "x + y"),
-        (Max, "max", "-INFINITY", "max(x, y)"),
+        (Sum, "sum", "0", "cub::Sum()"),
+        (Max, "max", "-INFINITY", "cub::Max()"),
     ]:
         register_reduce_operator(op_type, op_name, op_init, op_expr)
 
