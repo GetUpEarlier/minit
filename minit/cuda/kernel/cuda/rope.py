@@ -5,7 +5,7 @@ from ....compiler.cxx import CXXUnit
 from ....compiler.nvcc import nvcc
 
 @functools.lru_cache(maxsize=None)
-def generate_index_kernel(name: str, dtype: str):
+def generate_rope_kernel(name: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
 """
@@ -52,34 +52,32 @@ struct TensorIterator {
     }
 };
 
-__global__ void kernel(T* input, std::int32_t* index, T* output, size_t a, size_t b, size_t c, size_t d) {
-    size_t nr_elements = a * c * d;
+__global__ void kernel(T* input, T* freqs_cos, T* freqs_sin, T* output, size_t batch_size, size_t seqlen, size_t nr_heads, size_t head_size) {
+    size_t nr_complexes = batch_size * seqlen * nr_heads * (head_size/2);
     size_t stride = blockDim.x * gridDim.x;
-    TensorIterator<3> output_iterator;
-    output_iterator.shape[0] = a;
-    output_iterator.shape[1] = c;
-    output_iterator.shape[2] = d;
-    TensorIterator<3> input_iterator;
-    input_iterator.shape[0] = a;
-    input_iterator.shape[1] = b;
-    input_iterator.shape[2] = d;
-    for (size_t offset = blockIdx.x * blockDim.x + threadIdx.x; offset < nr_elements; offset += stride) {
-        auto output_offset = offset;
-        auto output_index = output_iterator.to_index(output_offset);
-        auto input_offset = input_iterator.to_offset({output_index[0], index[output_index[1]], output_index[2]});
-        output[offset] = input[input_offset];
+    TensorIterator<4> input_iterator {batch_size, seqlen, nr_heads, head_size/2};
+    TensorIterator<2> freqs_iterator {seqlen, head_size/2};
+    for (size_t offset = blockIdx.x * blockDim.x + threadIdx.x; offset < nr_complexes; offset += stride) {
+        auto input_index = input_iterator.to_index(offset);
+        auto real = input[offset*2];
+        auto imag = input[offset*2+1];
+        auto freqs_offset = freqs_iterator.to_offset({input_index[1], input_index[3]});
+        auto freq_cos = freqs_cos[freqs_offset];
+        auto freq_sin = freqs_sin[freqs_offset];
+        output[offset*2] = real * freq_cos - imag * freq_sin;
+        output[offset*2+1] = imag * freq_cos + real * freq_sin;
     }
 }
 
-extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, std::int32_t* index, T* output, size_t a, size_t b, size_t c, size_t d) {
-    size_t nr_elements = a * c * d;
-    if (nr_elements == 0) {
+extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* freqs_cos, T* freqs_sin, T* output, size_t batch_size, size_t seqlen, size_t nr_heads, size_t head_size) {
+    size_t nr_complexes = batch_size * seqlen * nr_heads * (head_size/2);
+    if (nr_complexes == 0) {
         return;
     }
     static constexpr size_t nr_sms = 108;
-    size_t nr_threads_per_block = std::min((size_t)1024, (size_t)((nr_elements + nr_sms - 1) / nr_sms));
-    size_t nr_blocks = (nr_elements + nr_threads_per_block - 1) / nr_threads_per_block;
-    kernel<<<nr_blocks, nr_threads_per_block, 0, stream>>>(input, index, output, a, b, c, d);
+    size_t nr_threads_per_block = std::min((size_t)1024, (size_t)((nr_complexes + nr_sms - 1) / nr_sms));
+    size_t nr_blocks = (nr_complexes + nr_threads_per_block - 1) / nr_threads_per_block;
+    kernel<<<nr_blocks, nr_threads_per_block, 0, stream>>>(input, freqs_cos, freqs_sin, output, batch_size, seqlen, nr_heads, head_size);
     CUDA_ASSERT(cudaGetLastError());
 }
 """

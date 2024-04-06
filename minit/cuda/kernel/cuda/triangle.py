@@ -5,11 +5,12 @@ from ....compiler.cxx import CXXUnit
 from ....compiler.nvcc import nvcc
 
 @functools.lru_cache(maxsize=None)
-def generate_triangle_kernel(name: str, predicate: str):
+def generate_triangle_kernel(name: str, predicate: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
 """
 #include <cuda.h>
+#include <cuda_fp16.h>
 #include <cuda/std/array>
 #include <stdexcept>
 
@@ -71,7 +72,7 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* output, size_t 
 }
 """
     source = substitude(kernel_template, {
-        "DATA_TYPE": "float",
+        "DATA_TYPE": dtype,
         "KERNEL_NAME": kernel_name,
         "PREDICATE": predicate,
     })

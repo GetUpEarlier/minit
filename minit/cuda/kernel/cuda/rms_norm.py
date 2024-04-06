@@ -5,7 +5,7 @@ from ....compiler.cxx import CXXUnit
 from ....compiler.nvcc import nvcc
 
 @functools.lru_cache(maxsize=None)
-def generate_reduce_kernel(name: str, init: str, expr: str, dtype: str):
+def generate_rms_norm_kernel(name: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
 """
@@ -49,58 +49,55 @@ struct TensorIterator {
     }
 };
 
-__global__ void thread_reduce_kernel(T* input, T* output, size_t a, size_t b, size_t c) {
-    size_t stride = blockDim.x * gridDim.x;
-    size_t nr_lines = a * c;
-    for (size_t offset = blockIdx.x * blockDim.x + threadIdx.x; offset < nr_lines; offset += stride) {
-        T result = ${REDUCE_INIT};
-        for (size_t j = 0; j < b; j++) {
-            T x = result;
-            T y = input[(offset / c) * (b*c) + offset%c + j * c];
-            result = ${REDUCE_EXPR}(x, y);
-        }
-        output[offset] = result;
-    }
-}
-
 template <size_t nr_threads>
-__launch_bounds__(nr_threads) __global__ void block_reduce_kernel(T* input, T* output, size_t a, size_t b, size_t c) {
+__launch_bounds__(nr_threads) __global__ void block_rms_norm_kernel(T* input, T* weight, T* output, size_t a, size_t b, size_t c, float eps) {
     typedef cub::BlockReduce<float, nr_threads> BlockReduce;
     __shared__ typename BlockReduce::TempStorage temp_storage;
     size_t nr_lines = a * c;
-    TensorIterator<3> input_iterator{a, b, c};
-    TensorIterator<2> output_iterator{a, c};
+    TensorIterator<2> line_iterator{a, c};
+    TensorIterator<3> iterator{a, b, c};
     for (size_t line = blockIdx.x; line < nr_lines; line += gridDim.x) {
-        auto output_index = output_iterator.to_index(line);
-        float result = ${REDUCE_INIT};
+        auto line_index = line_iterator.to_index(line);
+        __shared__ float sum;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            sum = 0;
+        }
         size_t nr_loops = (b + blockDim.x - 1) / blockDim.x;
         for (size_t i = 0; i < nr_loops; ++i) {
             size_t index = i * blockDim.x + threadIdx.x;
-            float value = index < b ? input[input_iterator.to_offset({output_index[0], index, output_index[1]})] : (T)${REDUCE_INIT};
-            float aggregate = BlockReduce(temp_storage).Reduce((float)value, ${REDUCE_EXPR}, nr_threads);
+            float value = index < b ? input[iterator.to_offset({line_index[0], index, line_index[1]})] : (T)0;
+            value = value * value;
+            float aggregate = BlockReduce(temp_storage).Reduce((float)value, cub::Sum(), nr_threads);
             if (threadIdx.x == 0) {
-                result = ${REDUCE_EXPR}(result, aggregate);
+                sum = cub::Sum()(sum, aggregate);
             }
             __syncthreads();
         }
-        if (threadIdx.x == 0) {
-            output[line] = (T)result;
+        float mean = sum / b;
+        float rms = sqrt(mean + eps);
+        for (size_t i = 0; i < nr_loops; ++i) {
+            size_t index = i * blockDim.x + threadIdx.x;
+            if (index < b) {
+                float value = input[iterator.to_offset({line_index[0], index, line_index[1]})];
+                value = value / rms;
+                value *= (float)weight[index];
+                output[iterator.to_offset({line_index[0], index, line_index[1]})] = value;
+            }
         }
     }
 }
 
-extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* output, size_t a, size_t b, size_t c) {
+extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* weight, T* output, size_t a, size_t b, size_t c, double eps) {
     static constexpr size_t nr_sms = 108;
     static constexpr size_t nr_threads_per_block = 1024;
     size_t nr_blocks = nr_sms;
-    block_reduce_kernel<nr_threads_per_block><<<nr_blocks, nr_threads_per_block, 0, stream>>>(input, output, a, b, c);
+    block_rms_norm_kernel<nr_threads_per_block><<<nr_blocks, nr_threads_per_block, 0, stream>>>(input, weight, output, a, b, c, (float)eps);
 }
 """
     source = substitude(kernel_template, {
         "DATA_TYPE": dtype,
         "KERNEL_NAME": kernel_name,
-        "REDUCE_INIT": init,
-        "REDUCE_EXPR": expr,
     })
     kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=source))
     return kernel

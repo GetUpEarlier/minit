@@ -5,11 +5,12 @@ from ....compiler.cxx import CXXUnit
 from ....compiler.nvcc import nvcc
 
 @functools.lru_cache(maxsize=None)
-def generate_sequence_kernel(name: str):
+def generate_sequence_kernel(name: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
 """
 #include <cuda.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cuda/std/array>
@@ -31,7 +32,7 @@ using T = ${DATA_TYPE};
 __global__ void kernel(T* output, T* start, T* step, size_t nr_elements) {
     size_t stride = blockDim.x * gridDim.x;
     for (size_t offset = blockIdx.x * blockDim.x + threadIdx.x; offset < nr_elements; offset += stride) {
-        output[offset] = (*start) + (*step) * offset;
+        output[offset] = (*start) + (T)((double)(*step) * (double)offset);
     }
 }
 
@@ -44,7 +45,7 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* output, T* start, T* step
 }
 """
     source = substitude(kernel_template, {
-        "DATA_TYPE": "float",
+        "DATA_TYPE": dtype,
         "KERNEL_NAME": kernel_name,
     })
     kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=source))

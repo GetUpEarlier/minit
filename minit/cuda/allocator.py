@@ -31,7 +31,7 @@ extern "C" void* allocate_cuda_memory(size_t size) {
 }
 
 extern "C" void copy_cuda_memory(void* dst, const void* src, size_t size) {
-    CUDA_ASSERT(cudaMemcpyAsync(dst, src, size, cudaMemcpyDefault));
+    CUDA_ASSERT(cudaMemcpyAsync(dst, src, size, cudaMemcpyDefault, nullptr));
 }
 
 extern "C" void free_cuda_memory(void* pointer) {

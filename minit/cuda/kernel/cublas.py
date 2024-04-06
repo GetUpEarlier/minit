@@ -5,14 +5,12 @@ from ...compiler.cxx import CXXUnit
 from ...compiler.gcc import gcc
 
 @functools.lru_cache(maxsize=None)
-def generate_cublas_kernel(name: str):
+def generate_cublas_kernel(name: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
 """
 #include <cuda.h>
 #include <cuda_runtime.h>
-// #include <cublas.h>
-// #include <cublas_api.h>
 #include <cublasLt.h>
 #include <unordered_map>
 #include <stdexcept>
@@ -36,9 +34,13 @@ def generate_cublas_kernel(name: str):
         }                                                           \\
     } while (0)
 
+using T = ${DATA_TYPE};
+static constexpr cudaDataType_t kCudaDataType = ${CUDA_DATA_TYPE};
+static constexpr cublasComputeType_t kCudaComputeDataType = ${CUDA_COMPUTE_DATA_TYPE};
+
 cublasLtMatrixLayout_t create_layout(size_t batch, size_t nr_rows, size_t nr_cols) {
     cublasLtMatrixLayout_t layout;
-    CUBLAS_ASSERT(cublasLtMatrixLayoutCreate(&layout, CUDA_R_32F, nr_rows, nr_cols, nr_rows));
+    CUBLAS_ASSERT(cublasLtMatrixLayoutCreate(&layout, kCudaDataType, nr_rows, nr_cols, nr_rows));
     int32_t batch_i32 = batch;
     int64_t batch_stride_i64 = nr_rows * nr_cols;
     CUBLAS_ASSERT(cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_i32, sizeof(batch_i32)));
@@ -61,7 +63,7 @@ cublasLtHandle_t get_handle() {
 extern "C" void ${KERNEL_NAME}(cudaStream_t stream, void* a, void* b, void* c, size_t batch, size_t m, size_t n, size_t k, void* workspace) {
     auto handle = get_handle();
     cublasLtMatmulDesc_t desc;
-    CUBLAS_ASSERT(cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+    CUBLAS_ASSERT(cublasLtMatmulDescCreate(&desc, kCudaComputeDataType, kCudaDataType));
     cublasLtMatmulPreference_t preference;
     CUBLAS_ASSERT(cublasLtMatmulPreferenceCreate(&preference));
     size_t workspace_size = 0;
@@ -82,7 +84,7 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, void* a, void* b, void* c, s
         fprintf(stderr, "no gemm algo found\\n");
     }
     float alpha = 1.0, beta = 1.0;
-    CUDA_ASSERT(cudaMemset(c, 0, batch * m * n * sizeof(float)));
+    CUDA_ASSERT(cudaMemset(c, 0, batch * m * n * sizeof(T)));
     CUBLAS_ASSERT(cublasLtMatmul(
         handle,
         desc,
@@ -104,7 +106,18 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, void* a, void* b, void* c, s
 }
 """
     source = substitude(kernel_template, {
-        "KERNEL_NAME":  kernel_name
+        "KERNEL_NAME":  kernel_name,
+        "DATA_TYPE": dtype,
+        "CUDA_DATA_TYPE": {
+            "float": "CUDA_R_32F",
+            "__half": "CUDA_R_16F",
+            "__nv_bfloat16": "CUDA_R_16BF",
+        }[dtype],
+        "CUDA_COMPUTE_DATA_TYPE": {
+            "float": "CUBLAS_COMPUTE_32F",
+            "__half": "CUBLAS_COMPUTE_32F",
+            "__nv_bfloat16": "CUBLAS_COMPUTE_32F",
+        }[dtype]
     })
     kernel = gcc.compile(CXXUnit(entrance=kernel_name, source=source, includes=["/usr/local/cuda/include"], libraries=[
         "/usr/local/cuda/lib64/libcublasLt.so",

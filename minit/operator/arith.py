@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -25,5 +26,7 @@ class Cosine:
 class Sine:
     ...
 
+@dataclass
 class Constant:
     value: Any
+    dtype: str

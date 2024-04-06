@@ -5,11 +5,12 @@ from ....compiler.cxx import CXXUnit
 from ....compiler.nvcc import nvcc
 
 @functools.lru_cache(maxsize=None)
-def generate_elemwise_kernel(name: str, nr_inputs: int, expr: str):
+def generate_elemwise_kernel(name: str, nr_inputs: int, expr: str, dtype: str):
     kernel_name = f"minit_elemwise_{name}"
     kernel_template =\
 """
 #include <cuda.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cuda/std/array>
@@ -55,7 +56,7 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T** inputs, T* output, size_
 }
 """
     source = substitude(kernel_template, {
-        "DATA_TYPE": "float",
+        "DATA_TYPE": dtype,
         "NR_INPUTS": str(nr_inputs),
         "EXPR": expr,
         "KERNEL_NAME": kernel_name,

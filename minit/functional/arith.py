@@ -61,8 +61,7 @@ def cosine(x: Tensor):
     return z
 
 
-def constant(x: Number):
-    opr = Constant()
-    opr.value = x
+def constant(x: Number, dtype: str):
+    opr = Constant(value=x, dtype=dtype)
     (z,) = dispatch(opr)
     return z

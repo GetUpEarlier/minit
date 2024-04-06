@@ -6,7 +6,7 @@ from minit.cuda.tensor import CUDATensor
 from minit.functional.generate import fill, generate_sequence
 from minit.functional.shape import add_axis, broadcast, fold, expand, remove_axis, repeat, repeat_interleaved, transpose
 from minit.functional.index import split, tie
-from minit.functional.special import sigmoid
+from minit.functional.special import rms_norm, rope, sigmoid, softmax
 from minit.module import Module
 from minit.core.tensor import Tensor
 from minit.functional.arith import add, constant, cosine, divide, exponential, power, multiply, sine, square, square_root, subtract
@@ -17,55 +17,16 @@ from minit.module.list import ModuleList
 import minit.cuda.dispatch
 import nvtx
 
-def check_nan(x: Tensor):
-    value = x.numpy()
-    mean = value.mean()
-    var = value.var()
-    if mean > 1e20 or mean < 1e20:
-        breakpoint()
-    if var > 1e20:
-        breakpoint()
-    if numpy.any(numpy.isnan(value)):
-        breakpoint()
+default_dtype = "float16"
 
 def debug_tensor(name: str, x: Tensor):
-    print(f"{name} mean: {x.numpy().mean()} var: {x.numpy().var()}")
+    print(f"{name} mean: {x.numpy().astype(numpy.float32).mean()} var: {x.numpy().astype(numpy.float32).var()}")
 
 def dump_tensor(name: str, x: Tensor):
     numpy.save(f"{name}_minit", x.numpy())
 
 def silu(x: Tensor) -> Tensor:
     return multiply(x, sigmoid(x))
-
-@nvtx.annotate("rope")
-def rope(x: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor) -> Tensor:
-    assert len(x.shape) == 4
-    precomp_freqs_cos = precomp_freqs_cos.add_axis(0, x.shape[0])
-    precomp_freqs_cos = precomp_freqs_cos.add_axis(2, x.shape[2])
-    precomp_freqs_cos = precomp_freqs_cos.add_axis(4)
-    precomp_freqs_sin = precomp_freqs_sin.add_axis(0, x.shape[0])
-    precomp_freqs_sin = precomp_freqs_sin.add_axis(2, x.shape[2])
-    precomp_freqs_sin = precomp_freqs_sin.add_axis(4)
-    shape = x.shape
-    head_size = shape[3]
-    x_real, x_imag = x.expand(3, [head_size // 2, 2]).split(4, sizes=[1, 1])
-    x_real, x_imag = x_real * precomp_freqs_cos - x_imag * precomp_freqs_sin,  x_imag * precomp_freqs_cos + x_real * precomp_freqs_sin
-    x = tie((x_real, x_imag), axis=4)
-    x = fold(x, 3, 5)
-    assert x.shape == shape
-    return x
-
-def rms_norm(x: Tensor, axis: int, eps: float) -> Tensor:
-    ms = x.square().mean(axis).broadcast(axis, x.shape[axis])
-    rms = (ms + eps).square_root()
-    return x / rms
-
-@nvtx.annotate("softmax")
-def softmax(x: Tensor, axis: int) -> Tensor:
-    max_x = x.max(axis).broadcast(axis, x.shape[axis])
-    exp_x_sub_max_x = (x - max_x).exponential()
-    result = exp_x_sub_max_x / exp_x_sub_max_x.sum(axis).broadcast(axis, x.shape[axis])
-    return result
 
 class Attention(Module):
     hidden_size: int
@@ -80,10 +41,10 @@ class Attention(Module):
         self.nr_querys = nr_querys
         self.nr_groups = nr_groups
         self.head_size = head_size
-        self.q_projection = self.register_buffer("q_projection", (nr_querys * head_size, hidden_size), "float32")
-        self.k_projection = self.register_buffer("k_projection", (nr_key_values // 2 * head_size, hidden_size), "float32")
-        self.v_projection = self.register_buffer("v_projection", (nr_key_values // 2 * head_size, hidden_size), "float32")
-        self.output_projection = self.register_buffer("output_projection", (hidden_size, nr_querys * head_size), "float32")
+        self.q_projection = self.register_buffer("q_projection", (nr_querys * head_size, hidden_size), default_dtype)
+        self.k_projection = self.register_buffer("k_projection", (nr_key_values // 2 * head_size, hidden_size), default_dtype)
+        self.v_projection = self.register_buffer("v_projection", (nr_key_values // 2 * head_size, hidden_size), default_dtype)
+        self.output_projection = self.register_buffer("output_projection", (hidden_size, nr_querys * head_size), default_dtype)
 
     @nvtx.annotate("attention")
     def forward(self, x: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor):
@@ -136,9 +97,9 @@ class Attention(Module):
 class FeedForward(Module):
     def __init__(self, hidden_size: int, internal_size: int) -> None:
         super().__init__()
-        self.weight0 = self.register_buffer("weight0", (internal_size, hidden_size), "float32")
-        self.weight1 = self.register_buffer("weight1", (hidden_size, internal_size), "float32")
-        self.weight2 = self.register_buffer("weight2", (internal_size, hidden_size), "float32")
+        self.weight0 = self.register_buffer("weight0", (internal_size, hidden_size), default_dtype)
+        self.weight1 = self.register_buffer("weight1", (hidden_size, internal_size), default_dtype)
+        self.weight2 = self.register_buffer("weight2", (internal_size, hidden_size), default_dtype)
 
     @nvtx.annotate("feed_forward")
     def forward(self, x: Tensor):
@@ -151,15 +112,17 @@ class FeedForward(Module):
 class RMSNorm(Module):
     def __init__(self, size: int) -> None:
         super().__init__()
-        self.weight = self.register_buffer("weight", (size,), "float32")
+        self.weight = self.register_buffer("weight", (size,), default_dtype)
 
     @nvtx.annotate("rms_norm")
     def forward(self, x: Tensor):
-        weight = self.weight
-        while len(weight.shape) < len(x.shape):
-            weight = weight.add_axis(0, x.shape[-1-len(weight.shape)])
+        # weight = self.weight
+        # while len(weight.shape) < len(x.shape):
+        #     weight = weight.add_axis(0, x.shape[-1-len(weight.shape)])
+        # axis = len(x.shape) - 1
+        # return rms_norm(x, weight, axis, 1e-5) * weight
         axis = len(x.shape) - 1
-        return rms_norm(x, axis, 1e-5) * weight
+        return rms_norm(x, self.weight, axis, 1e-5)
 
 
 class TransformerBlock(Module):
@@ -185,7 +148,7 @@ class TransformerBlock(Module):
 class Embedding(Module):
     def __init__(self, size: int, dim: int) -> None:
         super().__init__()
-        self.weight = self.register_buffer("weight", (size, dim), "int8")
+        self.weight = self.register_buffer("weight", (size, dim), default_dtype)
 
     # [B, S] . [W, H] -> [B, S, H]
     @nvtx.annotate("embedding.forward")
@@ -218,12 +181,16 @@ class LlaMa2(Module):
         self.freqs_cos, self.freqs_sin = self.precompute_freqs(head_size, 1024, 1e6)
 
     def precompute_freqs(self, dim: int, size: int, theta: float) -> Tuple[Tensor, Tensor]:
-        freqs = fill(1.0, (dim//2,), "float32") / fill(theta, (dim//2,), "float32") ** generate_sequence(0, dim//2, 2/dim)
+        freqs = fill(1.0, (dim//2,), "float32") / fill(theta, (dim//2,), "float32") ** generate_sequence(0, dim//2, 2/dim, dtype="float32")
         freqs = freqs.add_axis(1)
-        t = generate_sequence(0, size, 1)
+        t = generate_sequence(0, size, 1, dtype="float32")
         t = t.add_axis(1)
         freqs = matrix_multiply(t, freqs)
-        return freqs.cosine(), freqs.sine()
+        freqs_cos = freqs.cosine()
+        freqs_sin = freqs.sine()
+        freqs_cos = CUDATensor.from_numpy(freqs_cos.numpy().astype(getattr(numpy, default_dtype)))
+        freqs_sin = CUDATensor.from_numpy(freqs_sin.numpy().astype(getattr(numpy, default_dtype)))
+        return freqs_cos, freqs_sin
 
     @nvtx.annotate("llama")
     def forward(self, input_ids: Tensor):
@@ -242,6 +209,7 @@ class LlaMa2(Module):
     
 
 def load_mistral_model(ckpt: Dict[str, numpy.ndarray]):
+    import torch
     model = LlaMa2(
         embedding_size=32000,
         nr_layers=32,
@@ -257,6 +225,7 @@ def load_mistral_model(ckpt: Dict[str, numpy.ndarray]):
             layer_id = int(name.split(".")[1])
         else:
             layer_id = None
+        array = array.to(getattr(torch, default_dtype))
         if name == "tok_embeddings.weight":
             model.input_embedding.weight.copy_from_numpy(array)
         elif name == "norm.weight":
@@ -299,18 +268,20 @@ def main():
     print(f"eos: {tokenizer.id_to_piece(tokenizer.eos_id())}")
     prompt = ""
     while True:
-        print("User:", end="", flush=True)
+        print("User:", end="\t", flush=True)
         line = input()
         prompt += f"<s>[INST] {line} [/INST]"
         [input_ids,] = tokenizer.tokenize([
             prompt
         ])
         result = ""
-        print("Assistant:", end="", flush=True)
+        print("Assistant:", end="\t", flush=True)
         while True:
-            output_probs: numpy.ndarray = model.forward(CUDATensor.from_numpy(numpy.array([input_ids], dtype=numpy.float32))).numpy()
+            output_probs: numpy.ndarray = model.forward(CUDATensor.from_numpy(torch.tensor([input_ids], dtype=torch.int32))).numpy()
             output_id = output_probs.argmax(axis=-1)[0][-1].item()
             output_piece = tokenizer.id_to_piece(output_id)
+            output_prob = output_probs[0][-1][output_id]
+            # print(output_prob)
             result += output_piece
             if output_piece == "<unk>":
                 raise

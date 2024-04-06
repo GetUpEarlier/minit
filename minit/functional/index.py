@@ -40,7 +40,7 @@ def split(x: Tensor, axis: int, sizes: Tuple[Tensor, ...]) -> Tuple[Tensor, ...]
     for size in sizes:
         start = offset
         stop = start + size.item()
-        zs.append(slice(x, constant(start), constant(stop), axis))
+        zs.append(slice(x, constant(start, dtype="int32"), constant(stop, dtype="int32"), axis))
         offset = stop
     return tuple(zs)
 

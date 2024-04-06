@@ -10,7 +10,7 @@ def dispatch(operator: Operator, *args: Tensor) -> Tuple[Tensor, ...]:
     outputs = DISPATCH_TABLE[type(operator)](operator, *args)
     return outputs
 
-def register(function: FunctionType):
+def register_dispatch(function: FunctionType):
     signature = inspect.signature(function)
     op_type = signature.parameters["op"].annotation
     print(f"registering {op_type}")
