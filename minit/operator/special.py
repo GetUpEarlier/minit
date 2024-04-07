@@ -1,21 +1,23 @@
 from dataclasses import dataclass
 
+from ..core.operator import Operator
 
-class Sigmoid:
+
+class Sigmoid(Operator):
     ...
 
 
 @dataclass
-class RMSNorm:
+class RMSNorm(Operator):
     axis: int
     eps: float
 
 
 @dataclass
-class RoPE:
+class RoPE(Operator):
     ...
 
 
 @dataclass
-class Softmax:
+class Softmax(Operator):
     axis: int

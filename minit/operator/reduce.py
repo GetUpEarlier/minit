@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 
+from ..core.operator import Operator
+
 
 @dataclass
-class Sum:
+class Sum(Operator):
     axis: int
 
 
 @dataclass
-class Max:
+class Max(Operator):
     axis: int

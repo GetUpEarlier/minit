@@ -1,32 +1,41 @@
 from dataclasses import dataclass
 from typing import Any
 
+from ..core.scalar import ScalarTensor
+from ..core.dispatch import register_dispatch
+from ..core.operator import Operator
 
-class Add:
+
+class Add(Operator):
     ...
 
-class Subtract:
+class Subtract(Operator):
     ...
 
-class Multiply:
+class Multiply(Operator):
     ...
 
-class Divide:
+class Divide(Operator):
     ...
 
-class Power:
+class Power(Operator):
     ...
 
-class Exponential:
+class Exponential(Operator):
     ...
 
-class Cosine:
+class Cosine(Operator):
     ...
 
-class Sine:
+class Sine(Operator):
     ...
 
 @dataclass
-class Constant:
+class Constant(Operator):
     value: Any
     dtype: str
+
+@register_dispatch()
+def register_constant(op: Constant):
+    c = ScalarTensor(op.value, op.dtype)
+    return (c,)

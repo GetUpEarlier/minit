@@ -118,7 +118,7 @@ class Array(Generic[_T]):
     def cosine(self):
         from ..functional.arith import cosine
         return cosine(self)
-    
+
     __add__ = add
     __radd__ = _reversed(add)
     __sub__ = subtract

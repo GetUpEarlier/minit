@@ -1,19 +1,21 @@
 from dataclasses import dataclass
 
+from ..core.operator import Operator
 
-class MatrixMultiply:
+
+class MatrixMultiply(Operator):
     ...
 
 
-class BatchMatrixMultiply:
+class BatchMatrixMultiply(Operator):
     ...
 
 
 @dataclass
-class TriangleUpper:
+class TriangleUpper(Operator):
     diagonal: int
 
 
 @dataclass
-class TriangleLower:
+class TriangleLower(Operator):
     diagonal: int

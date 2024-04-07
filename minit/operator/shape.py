@@ -1,28 +1,30 @@
 from dataclasses import dataclass
 from typing import List
 
+from ..core.operator import Operator
+
 
 @dataclass
-class Fold:
+class Fold(Operator):
     start: int
     stop: int
 
 @dataclass
-class Expand:
+class Expand(Operator):
     axis: int
 
 @dataclass
-class AddAxis:
+class AddAxis(Operator):
     axis: int
 
-class RemoveAxis:
-    axis: int
-
-@dataclass
-class Broadcast:
+class RemoveAxis(Operator):
     axis: int
 
 @dataclass
-class Transpose:
+class Broadcast(Operator):
+    axis: int
+
+@dataclass
+class Transpose(Operator):
     axis_a: int
     axis_b: int

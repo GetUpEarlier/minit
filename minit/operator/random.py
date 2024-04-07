@@ -1,5 +1,8 @@
-class Uniform:
+from ..core.operator import Operator
+
+
+class Uniform(Operator):
     ...
 
-class Normal:
+class Normal(Operator):
     ...
