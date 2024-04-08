@@ -2,10 +2,10 @@ import ctypes
 from numbers import Number
 from typing import Optional, Tuple
 
+from ..core.shape import to_immediate_shape
+from ..core.scalar import ScalarTensor
 from ..core.dtype import dtype_info
-
 from .lib.cuda_runtime import load_cuda_runtime
-
 from ..core.tensor import Tensor
 from .allocator import CUDAMemory, copy_cuda_memory, sync_cuda
 
@@ -20,8 +20,8 @@ class CUDATensor(Tensor):
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        return self._shape
-    
+        return tuple(map(lambda x: ScalarTensor(x, "int32"), self._shape))
+
     @property
     def dtype(self) -> str:
         return self._dtype
@@ -39,9 +39,10 @@ class CUDATensor(Tensor):
 
     @staticmethod
     def allocate(shape: Tuple[int, ...], dtype: str) -> "CUDATensor":
-        shape = tuple(shape)
+        shape = to_immediate_shape(shape)
         size = dtype_info(dtype).size_in_bytes
         for dim in shape:
+            assert not isinstance(dim, Tensor)
             size *= dim
         memory = CUDAMemory(size)
         result = CUDATensor()
@@ -52,7 +53,7 @@ class CUDATensor(Tensor):
 
     @staticmethod
     def wrap(shape: Tuple[int, ...], dtype: str, memory: CUDAMemory) -> "CUDATensor":
-        shape = tuple(shape)
+        shape = to_immediate_shape(shape)
         size = dtype_info(dtype).size_in_bytes
         for dim in shape:
             size *= dim
@@ -79,7 +80,7 @@ class CUDATensor(Tensor):
         return result
 
     def copy_from_numpy(self, array: numpy.ndarray):
-        assert array.shape == self.shape, f"{array.shape} vs {self.shape}"
+        assert array.shape == self._shape, f"{array.shape} vs {self._shape}"
         import torch
         if isinstance(array, torch.Tensor):
             array: torch.Tensor
@@ -100,11 +101,11 @@ class CUDATensor(Tensor):
         copy_cuda_memory(self.data_ptr, pointer, size)
 
     def numpy(self):
-        host_data = numpy.full(self.shape, 0, self.dtype)
+        host_data = numpy.full(self._shape, 0, self.dtype)
         host_data = numpy.ascontiguousarray(host_data)
         pointer, _read_only_flag = host_data.__array_interface__['data']
         size = dtype_info(self.dtype).size_in_bytes
-        for dim in self.shape:
+        for dim in self._shape:
             size *= dim
         copy_cuda_memory(pointer, self.data_ptr, size)
         sync_cuda()

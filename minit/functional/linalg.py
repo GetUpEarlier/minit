@@ -25,7 +25,7 @@ def batch_matrix_multiply(x: Tensor, y: Tensor):
     assert len(x.shape) > 2
     assert len(y.shape) > 2
     bs = x.shape[:-2]
-    assert bs == y.shape[:-2]
+    # assert bs == y.shape[:-2]
     x = fold(x, 0, len(bs))
     y = fold(y, 0, len(bs))
     (z,) = dispatch(BatchMatrixMultiply(), x, y)

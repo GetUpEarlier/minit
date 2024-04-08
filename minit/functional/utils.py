@@ -11,7 +11,7 @@ def _broadcast_scalar(*args) -> Tuple[Tensor, ...]:
             if tensor is None:
                 tensor = arg
             else:
-                assert tensor.shape == arg.shape
+                # assert tensor.shape == arg.shape
                 assert tensor.dtype == arg.dtype
     for arg in args:
         if not isinstance(arg, Tensor):
