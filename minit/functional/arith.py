@@ -2,7 +2,7 @@ from numbers import Number
 from typing import Union
 from ..core.tensor import Tensor
 from ..core.dispatch import dispatch
-from ..operator.arith import Add, Constant, Cosine, Exponential, Power, Sine, Subtract, Multiply, Divide
+from ..operator.arith import Add, Cast, Constant, Cosine, Exponential, Power, Sine, Subtract, Multiply, Divide
 from .utils import _broadcast_scalar
 
 
@@ -64,4 +64,9 @@ def cosine(x: Tensor):
 def constant(x: Number, dtype: str):
     opr = Constant(value=x, dtype=dtype)
     (z,) = dispatch(opr)
+    return z
+
+
+def cast(x: Tensor, dtype: str):
+    (z,) = dispatch(Cast(dtype), x)
     return z

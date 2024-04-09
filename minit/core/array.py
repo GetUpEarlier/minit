@@ -119,6 +119,14 @@ class Array(Generic[_T]):
         from ..functional.arith import cosine
         return cosine(self)
 
+    def reinterpret(self, target: str, axis: Optional[int] = None):
+        from ..functional.shape import reinterpret
+        return reinterpret(self, target, axis)
+
+    def cast(self, dtype: str):
+        from ..functional.arith import cast
+        return cast(self, dtype)
+
     __add__ = add
     __radd__ = _reversed(add)
     __sub__ = subtract

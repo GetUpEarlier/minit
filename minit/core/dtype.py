@@ -32,3 +32,8 @@ register_dtype("int64", int, 8)
 register_dtype("int32", int, 4)
 register_dtype("int16", int, 2)
 register_dtype("int8", int, 1)
+
+register_dtype("uint64", int, 8)
+register_dtype("uint32", int, 4)
+register_dtype("uint16", int, 2)
+register_dtype("uint8", int, 1)

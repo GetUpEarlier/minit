@@ -66,6 +66,12 @@ __global__ void kernel(T* input, std::int32_t* index, T* output, size_t a, size_
     for (size_t offset = blockIdx.x * blockDim.x + threadIdx.x; offset < nr_elements; offset += stride) {
         auto output_offset = offset;
         auto output_index = output_iterator.to_index(output_offset);
+        if (index[output_index[1]] < 0) {
+            __trap();
+        }
+        if (index[output_index[1]] >= b) {
+            __trap();
+        }
         auto input_offset = input_iterator.to_offset({output_index[0], index[output_index[1]], output_index[2]});
         output[offset] = input[input_offset];
     }

@@ -35,6 +35,10 @@ class Constant(Operator):
     value: Any
     dtype: str
 
+@dataclass
+class Cast(Operator):
+    dtype: str
+
 @register_dispatch()
 def register_constant(op: Constant):
     c = ScalarTensor(op.value, op.dtype)

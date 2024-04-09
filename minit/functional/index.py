@@ -35,7 +35,7 @@ def split(x: Tensor, axis: int, sizes: Tuple[Tensor, ...]) -> Tuple[Tensor, ...]
     offset = 0
     for size in sizes:
         offset += size.item()
-    assert offset == x.shape[axis]
+    assert offset == x.shape[axis].item()
     offset = 0
     for size in sizes:
         start = offset

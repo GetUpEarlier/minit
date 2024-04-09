@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from ..core.operator import Operator
 
@@ -28,3 +28,8 @@ class Broadcast(Operator):
 class Transpose(Operator):
     axis_a: int
     axis_b: int
+
+@dataclass
+class Reinterpret(Operator):
+    target: str
+    axis: Optional[int]

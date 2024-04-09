@@ -2,7 +2,7 @@ from typing import List, Optional, Tuple
 
 from ..core.tensor import Tensor
 from ..core.dispatch import dispatch
-from ..operator.shape import AddAxis, Broadcast, Fold, Expand, RemoveAxis, Transpose
+from ..operator.shape import AddAxis, Broadcast, Fold, Expand, Reinterpret, RemoveAxis, Transpose
 from .utils import _convert_scalar
 
 
@@ -50,3 +50,8 @@ def repeat(x: Tensor, axis: int, size: Tensor) -> Tensor:
 def repeat_interleaved(x: Tensor, axis: int, size: Tensor) -> Tensor:
     (size,) = _convert_scalar(size)
     return fold(broadcast(add_axis(x, axis+1), axis+1, size), axis, axis+2)
+
+
+def reinterpret(x: Tensor, target: str, axis: Optional[int] = None) -> Tensor:
+    (z,) = dispatch(Reinterpret(target, axis), x)
+    return z

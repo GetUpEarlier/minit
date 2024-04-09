@@ -16,7 +16,7 @@ class CUDATensor(Tensor):
     _dtype: str
 
     @property
-    def shape(self) -> Tuple[int, ...]:
+    def shape(self) -> Tuple[Tensor, ...]:
         return to_symbolic_shape(self._shape)
 
     @property

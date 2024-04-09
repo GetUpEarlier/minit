@@ -1,5 +1,7 @@
 from typing import Dict, List
 
+from ..core.shape import to_immediate_shape
+
 from ..cuda.tensor import CUDATensor
 from .module import Module
 
@@ -23,9 +25,11 @@ def load_from_safetensors(model: Module, paths: List[str]):
         print(f"loading safetensors from {path}")
         with safetensors.safe_open(path, framework="pt", device="cpu") as f:
             for key in f.keys():
-                print(f"loading safetensor {key}")
                 array = f.get_tensor(key)
                 dtype = model.get_buffer(key).dtype
+                print(f"loading safetensor {key} {array.shape} {array.dtype} -> {dtype}")
+                shape = to_immediate_shape(model.get_buffer(key).shape)
                 array = array.to(getattr(torch, dtype))
+                assert array.shape == shape
                 model.update_buffer(key, CUDATensor.from_numpy(array))
     return model

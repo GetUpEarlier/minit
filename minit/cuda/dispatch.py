@@ -2,6 +2,8 @@ import ctypes
 import math
 from typing import Union
 
+from .kernel.cuda.cast import generate_cast_kernel
+
 from ..core.shape import to_immediate_shape
 from ..core.scalar import ScalarTensor
 from ..core.tensor import Tensor
@@ -18,12 +20,12 @@ from .kernel.cuda.slice import generate_slice_kernel, generate_slice_set_kernel
 from .kernel.cuda.index import generate_index_kernel
 from ..operator.index import Index, Slice, Tie
 from .kernel.cuda.broadcast import generate_broadcast_kernel
-from ..operator.shape import AddAxis, Broadcast, Expand, Fold, RemoveAxis, Transpose
+from ..operator.shape import AddAxis, Broadcast, Expand, Fold, Reinterpret, RemoveAxis, Transpose
 from .kernel.cuda.fill import generate_fill_kernel
 from .kernel.cuda.generate import generate_sequence_kernel
 from ..operator.generate import Fill, GenerateSequence
 from .kernel.cuda.elemwise import generate_elemwise_kernel
-from ..operator.arith import Add, Constant, Cosine, Divide, Exponential, Power, Multiply, Sine, Subtract
+from ..operator.arith import Add, Constant, Cosine, Divide, Exponential, Power, Multiply, Sine, Subtract, Cast
 from .tensor import CUDATensor
 from ..operator.linalg import BatchMatrixMultiply, MatrixMultiply, TriangleLower, TriangleUpper
 from ..core.dispatch import register_dispatch
@@ -460,3 +462,26 @@ def register_softmax_operator(op: Softmax, x: CUDATensor):
         c *= dim
     kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(z.data_ptr), ctypes.c_size_t(a), ctypes.c_size_t(b), ctypes.c_size_t(c))
     return (z,)
+
+
+@register_dispatch()
+def register_reinterpret_operator(op: Reinterpret, x: CUDATensor):
+    shape = x._shape
+    source_size = dtype_info(x.dtype).size_in_bytes
+    target_size = dtype_info(op.target).size_in_bytes
+    dim = x.shape[op.axis].item()
+    new_dim = dim * source_size // target_size
+    assert new_dim * target_size // source_size == dim
+    z = CUDATensor.wrap(shape[:op.axis] + (new_dim,) + shape[op.axis+1:], op.target, x._memory)
+    return (z,)
+
+
+@register_dispatch()
+def register_cast_operator(op: Cast, x: CUDATensor): # type: ignore
+    c = CUDATensor.allocate(x._shape, op.dtype)
+    kernel = generate_cast_kernel(f"{x.dtype}_to_{c.dtype}", get_cuda_dtype(x.dtype), get_cuda_dtype(c.dtype))
+    size = 1
+    for dim in x._shape:
+        size *= dim
+    kernel(None, ctypes.c_void_p(x.data_ptr) , ctypes.c_void_p(c.data_ptr), ctypes.c_size_t(size))
+    return (c,)
