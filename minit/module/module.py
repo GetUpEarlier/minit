@@ -1,6 +1,7 @@
 from typing import Any, Dict, Generic, Optional, Set, Tuple, TypeVar
 
 from ..core.tensor import Tensor
+from ..core.meta import MetaTensor
 
 _Child = TypeVar("_Child")
 _Parent = TypeVar("_Parent")
@@ -20,9 +21,8 @@ class Module(Generic[_Parent]):
         return module
 
     def register_buffer(self, name: str, shape: Tuple[int, ...], dtype: str, buffer: Optional[Tensor] = None):
-        from ..cuda.tensor import CUDATensor
         if buffer is None:
-            buffer = CUDATensor.allocate(shape, dtype)
+            buffer = MetaTensor(shape, dtype)
         self.buffers[name] = ()
         return buffer
 

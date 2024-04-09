@@ -1,8 +1,10 @@
 import functools
+import os
 
 from ...compiler.template import substitude
 from ...compiler.cxx import CXXUnit
 from ...compiler.gcc import gcc
+from ..toolkit import find_cuda_include_directory, get_cuda_home
 
 @functools.lru_cache(maxsize=None)
 def generate_cublas_kernel(name: str, dtype: str):
@@ -119,8 +121,8 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, void* a, void* b, void* c, s
             "__nv_bfloat16": "CUBLAS_COMPUTE_32F",
         }[dtype]
     })
-    kernel = gcc.compile(CXXUnit(entrance=kernel_name, source=source, includes=["/usr/local/cuda/include"], libraries=[
-        "/usr/local/cuda/lib64/libcublasLt.so",
-        "/usr/local/cuda/lib64/libcudart.so",
+    kernel = gcc.compile(CXXUnit(entrance=kernel_name, source=source, includes=[find_cuda_include_directory()], libraries=[
+        os.path.join(get_cuda_home(), "lib64", "libcublasLt.so"),
+        os.path.join(get_cuda_home(), "lib64", "libcudart.so"),
     ]))
     return kernel

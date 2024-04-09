@@ -3,11 +3,12 @@ import os
 
 from .cache import cached_execute
 from .cxx import CXXCompiler, CXXLibrary, CXXUnit
+from ..cuda.toolkit import get_cuda_home
 
 
 class NVCC(CXXCompiler):
     def compile(self, unit: CXXUnit) -> CXXLibrary:
-        commands = ["/usr/local/cuda/bin/nvcc"]
+        commands = [os.path.join(get_cuda_home(), "bin", "nvcc")]
         for include in unit.includes:
             commands += ["-I", include]
         for library in unit.libraries:

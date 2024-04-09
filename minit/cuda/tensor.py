@@ -1,11 +1,8 @@
-import ctypes
 from numbers import Number
 from typing import Optional, Tuple
 
-from ..core.shape import to_immediate_shape
-from ..core.scalar import ScalarTensor
+from ..core.shape import to_immediate_shape, to_symbolic_shape
 from ..core.dtype import dtype_info
-from .lib.cuda_runtime import load_cuda_runtime
 from ..core.tensor import Tensor
 from .allocator import CUDAMemory, copy_cuda_memory, sync_cuda
 
@@ -20,7 +17,7 @@ class CUDATensor(Tensor):
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        return tuple(map(lambda x: ScalarTensor(x, "int32"), self._shape))
+        return to_symbolic_shape(self._shape)
 
     @property
     def dtype(self) -> str:
