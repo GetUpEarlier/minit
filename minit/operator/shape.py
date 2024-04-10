@@ -17,6 +17,7 @@ class Expand(Operator):
 class AddAxis(Operator):
     axis: int
 
+@dataclass
 class RemoveAxis(Operator):
     axis: int
 
@@ -32,4 +33,3 @@ class Transpose(Operator):
 @dataclass
 class Reinterpret(Operator):
     target: str
-    axis: Optional[int]

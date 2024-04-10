@@ -469,10 +469,10 @@ def register_reinterpret_operator(op: Reinterpret, x: CUDATensor):
     shape = x._shape
     source_size = dtype_info(x.dtype).size_in_bytes
     target_size = dtype_info(op.target).size_in_bytes
-    dim = x.shape[op.axis].item()
-    new_dim = dim * source_size // target_size
-    assert new_dim * target_size // source_size == dim
-    z = CUDATensor.wrap(shape[:op.axis] + (new_dim,) + shape[op.axis+1:], op.target, x._memory)
+    last_dim = x.shape[-1].item()
+    new_last_dim = last_dim * source_size // target_size
+    assert new_last_dim * target_size // source_size == last_dim
+    z = CUDATensor.wrap(shape[:-1] + (new_last_dim,), op.target, x._memory)
     return (z,)
 
 

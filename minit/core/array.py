@@ -119,9 +119,9 @@ class Array(Generic[_T]):
         from ..functional.arith import cosine
         return cosine(self)
 
-    def reinterpret(self, target: str, axis: Optional[int] = None):
+    def reinterpret(self, target: str):
         from ..functional.shape import reinterpret
-        return reinterpret(self, target, axis)
+        return reinterpret(self, target)
 
     def cast(self, dtype: str):
         from ..functional.arith import cast

@@ -38,6 +38,8 @@ def broadcast(x: Tensor, axis: int, size: Tensor) -> Tensor:
 
 
 def transpose(x: Tensor, axis_a: int, axis_b: int) -> Tensor:
+    if axis_a == axis_b:
+        return x
     (z,) = dispatch(Transpose(axis_a, axis_b), x)
     return z
 
@@ -52,6 +54,6 @@ def repeat_interleaved(x: Tensor, axis: int, size: Tensor) -> Tensor:
     return fold(broadcast(add_axis(x, axis+1), axis+1, size), axis, axis+2)
 
 
-def reinterpret(x: Tensor, target: str, axis: Optional[int] = None) -> Tensor:
-    (z,) = dispatch(Reinterpret(target, axis), x)
+def reinterpret(x: Tensor, target: str) -> Tensor:
+    (z,) = dispatch(Reinterpret(target), x)
     return z
