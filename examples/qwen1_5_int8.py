@@ -1,20 +1,22 @@
+import ctypes
+import functools
 import math
-from typing import Dict, Tuple
+from typing import Tuple
 
 import numpy
+from minit.compiler.cxx import CXXUnit
 from minit.cuda.tensor import CUDATensor
 from minit.functional.generate import fill, generate_sequence
-from minit.functional.shape import add_axis, broadcast, fold, expand, remove_axis, repeat, repeat_interleaved, transpose
-from minit.functional.index import split, tie
 from minit.functional.special import rms_norm, rope, sigmoid, softmax
 from minit.module import Module
 from minit.core.tensor import Tensor
-from minit.functional.arith import add, constant, cosine, divide, exponential, power, multiply, sine, square, square_root, subtract
-from minit.functional.linalg import batch_matrix_multiply, matrix_multiply, triangle_lower, triangle_upper
-from minit.functional.index import index, slice
-from minit.functional.reduce import mean, sum, max
-from minit.module.checkpoint import load_from_safetensors, load_from_torch
+from minit.functional.arith import constant
+from minit.functional.linalg import batch_matrix_multiply, matrix_multiply, triangle_upper
+from minit.module.checkpoint import load_from_safetensors
 from minit.module.list import ModuleList
+from minit.compiler.nvcc import nvcc
+from minit.cuda.kernel.utils import get_cuda_dtype
+from minit.compiler.template import substitude
 import minit.cuda.dispatch
 import minit.quantize.dispatch
 import nvtx
@@ -30,7 +32,7 @@ def dump_tensor(name: str, x: Tensor):
     numpy.save(f"{name}_minit", x.numpy())
 
 def silu(x: Tensor) -> Tensor:
-    return multiply(x, sigmoid(x))
+    return x * sigmoid(x)
 
 
 def unpack(x: Tensor, axis: int) -> Tensor:
@@ -45,6 +47,207 @@ def unpack(x: Tensor, axis: int) -> Tensor:
     x = x.fold(axis, axis+2)
     return x
 
+
+@functools.lru_cache(maxsize=None)
+def generate_quantized_matrix_multiply(name: str, dtype: str, output_dtype: str):
+    kernel_name = f"qmm_{name}"
+    kernel_template =\
+"""
+#include <cuda.h>
+#include <cuda_fp16.h>
+#include <stdexcept>
+
+
+#define CUDA_ASSERT(expr)                                           \\
+    do {                                                            \\
+        auto _err = (expr);                                         \\
+        if (_err != cudaSuccess) {                                  \\
+            throw std::runtime_error(cudaGetErrorString(_err));     \\
+        }                                                           \\
+    } while (0)
+
+
+#define CUDA_DEVICE_ASSERT(expr)                                            \\
+    do {                                                                    \\
+        auto _flag = (expr);                                                \\
+        if (!_flag) {                                                       \\
+            printf("assertion %s failed at %d\\n", #expr, (int)__LINE__);   \\
+            __trap();                                                       \\
+        }                                                                   \\
+    } while (0)
+
+
+static constexpr size_t char_bits = 8;
+
+template <typename T>
+struct Matrix {
+    T* data;
+    size_t nr_rows;
+    size_t nr_cols;
+
+    __device__ __forceinline__ T& operator()(size_t row, size_t col) {
+        CUDA_DEVICE_ASSERT(row < nr_rows && col < nr_cols);
+        return data[row * nr_cols + col];
+    }
+};
+
+
+template <typename TPack, size_t nr_bits>
+struct RowPackedMatrix {
+    using pack_type = TPack;
+
+    pack_type* data;
+    size_t nr_rows;
+    size_t nr_cols;
+
+    static constexpr size_t pack_size = (sizeof(pack_type) * char_bits) / nr_bits;
+
+    __device__ __forceinline__ pack_type operator()(size_t row, size_t col) const {
+        CUDA_DEVICE_ASSERT(row < nr_rows && col < nr_cols);
+        auto pack = data[row * (nr_cols / pack_size) + (col / pack_size)];
+        pack_type mask = 0;
+        for (size_t i = 0; i < nr_bits; ++i) {
+            mask |= pack_type((pack_type)1 << i);
+        }
+        return (pack >> ((col % pack_size) * nr_bits)) & mask;
+    }
+};
+
+
+template <typename TPack, size_t nr_bits>
+struct ColPackedMatrix {
+    using pack_type = TPack;
+
+    pack_type* data;
+    size_t nr_rows;
+    size_t nr_cols;
+
+    static constexpr size_t pack_size = (sizeof(pack_type) * char_bits) / nr_bits;
+
+    __device__ __forceinline__ pack_type operator()(size_t row, size_t col) const {
+        CUDA_DEVICE_ASSERT(row < nr_rows && col < nr_cols);
+        auto pack = data[(row / pack_size) * nr_cols + col];
+        pack_type mask = 0;
+        for (size_t i = 0; i < nr_bits; ++i) {
+            mask |= pack_type((pack_type)1 << i);
+        }
+        return (pack >> ((row % pack_size) * nr_bits)) & mask;
+    }
+};
+
+
+using T = ${DATA_TYPE};
+using TOut = ${OUTPUT_DATA_TYPE};
+static constexpr size_t tile_nk = ${TILE_NK};
+using pack_type = unsigned;
+static_assert(sizeof(pack_type) == 4);
+
+// thread + block together split on n
+// block split on k
+// no split m (for m)
+// load shared_memory on inputs
+// A[m, k] @ B[k, n] -> C[m, n]
+// half      pack(k)
+//
+// zeros: [groups, n // 4]
+// scales: [groups, n]
+__global__ void kernel(T* x, pack_type* qweight, int* g_idx, pack_type* zeros, T* scales, TOut* outputs,
+        int m, int n, int k, int nr_groups) {
+    // for k:
+    //      load n
+    //      load m
+    //      atomic_add()
+    auto thread_index = threadIdx.x;
+    auto block_x = blockIdx.x;
+    auto block_y = blockIdx.y;
+    CUDA_DEVICE_ASSERT(blockDim.x == tile_nk);
+    // [1 x tile_nk]
+    __shared__ T x_tile[tile_nk];
+    float w_tile[tile_nk];
+    // load weight
+    auto m_offset = 0;
+    auto n_offset = block_x * tile_nk + thread_index;
+    auto k_offset = block_y * tile_nk;
+    ColPackedMatrix<pack_type, 8> qweight_matrix {qweight, k, n};
+    RowPackedMatrix<pack_type, 8> zeros_matrix {zeros, nr_groups, n};
+    Matrix<T> scales_matrix {scales, nr_groups, n};
+    Matrix<T> x_matrix {x, m, k};
+    Matrix<TOut> outputs_matrix {outputs, m, n};
+    for (int i = 0; i < tile_nk; ++i) {
+        int index_k = k_offset + i;
+        int index_n = n_offset;
+        auto group = g_idx[index_k];
+        float zero = zeros_matrix(group, n_offset) + 1;
+        float scale = scales_matrix(group, n_offset);
+        w_tile[i] = (float(qweight_matrix(index_k, n_offset)) - zero) * scale;
+    }
+    // load inputs
+    for (int i = 0; i < m; ++i) {
+        int index_m = i + m_offset;
+        int index_k = k_offset + thread_index;
+        x_tile[thread_index] = x_matrix(index_m, index_k);
+        __syncthreads(); // acquire x_tile
+        float result = 0;
+        for (int j = 0; j < tile_nk; ++j) {
+            result += (float)x_tile[j] * w_tile[j];
+        }
+        __syncthreads(); // release x_tile
+        int index_n = n_offset;
+        atomicAdd(&outputs_matrix(index_m, index_n), (TOut)result);
+    }
+}
+
+extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* x, unsigned* qweight, int* g_idx, unsigned* zeros, T* scales, TOut* outputs,
+        int m, int n, int k, int nr_groups) {
+    auto nr_ntiles = (n + tile_nk - 1) / tile_nk;
+    auto nr_ktiles = (k + tile_nk - 1) / tile_nk;
+    if (nr_ntiles * tile_nk != n) {
+        __builtin_trap();
+    }
+    if (nr_ktiles * tile_nk != k) {
+        __builtin_trap();
+    }
+    dim3 grid_dim = {nr_ntiles, nr_ktiles};
+    dim3 block_dim = {tile_nk};
+    kernel<<<grid_dim, block_dim, 0, stream>>>(x, qweight, g_idx, zeros, scales, outputs, m, n, k, nr_groups);
+    CUDA_ASSERT(cudaGetLastError());
+}
+
+"""
+    kernel_source = substitude(kernel_template, {
+        "DATA_TYPE": get_cuda_dtype(dtype),
+        "OUTPUT_DATA_TYPE": get_cuda_dtype(output_dtype),
+        "TILE_NK": "32",
+        "KERNEL_NAME": kernel_name,
+    })
+    kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=kernel_source))
+    return kernel
+
+
+@nvtx.annotate("quantized_matrix_multiply")
+def quantized_matrix_multiply(x: CUDATensor, qweight: CUDATensor, zeros: CUDATensor, scales: CUDATensor, groups: CUDATensor):
+    kernel = generate_quantized_matrix_multiply("qmm", x.dtype, "float32")
+    *ms, k0 = x.shape
+    quad_k1, n0 = qweight.shape
+    g0, quad_n1 = zeros.shape
+    g1, n2 = scales.shape
+    k2, = groups.shape
+    assert k0.item() == quad_k1.item() * 4 == k2.item()
+    assert g0.item() == g1.item()
+    assert n0.item() == quad_n1.item() * 4 == n2.item()
+    m_item = 1
+    for m in ms:
+        m_item *= m.item()
+    k = k0
+    n = n0
+    g = g0
+    assert scales.dtype == x.dtype
+    output = CUDATensor.allocate((*ms, n0), "float32")
+    output._memory.reset()
+    kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(qweight.data_ptr), ctypes.c_void_p(groups.data_ptr),
+           ctypes.c_void_p(zeros.data_ptr), ctypes.c_void_p(scales.data_ptr), ctypes.c_void_p(output.data_ptr), 
+           ctypes.c_int(m_item), ctypes.c_int(n.item()), ctypes.c_int(k.item()), ctypes.c_int(g.item()))
+    return output.cast(x.dtype)
 
 
 class QLinear(Module):
@@ -65,8 +268,8 @@ class QLinear(Module):
         return QuantizedTensor(unpack(self.qweight, 0), self.g_idx, unpack(self.qzeros, 1), self.scales)
 
     def forward(self, x: Tensor):
-        weight = self.weight.dequantize().transpose(0, 1)
-        return matrix_multiply(x, weight)
+        output = quantized_matrix_multiply(x, self.qweight, self.qzeros, self.scales, self.g_idx)
+        return output
 
 
 class QLinearWithBias(Module):
@@ -89,8 +292,7 @@ class QLinearWithBias(Module):
         return QuantizedTensor(unpack(self.qweight, 0), self.g_idx, unpack(self.qzeros, 1), self.scales)
 
     def forward(self, x: Tensor):
-        weight = self.weight.dequantize().transpose(0, 1)
-        output = matrix_multiply(x, weight)
+        output = quantized_matrix_multiply(x, self.qweight, self.qzeros, self.scales, self.g_idx)
         bias = self.bias
         while len(bias.shape) < len(x.shape):
             bias = bias.add_axis(0, x.shape[-1-len(bias.shape)])

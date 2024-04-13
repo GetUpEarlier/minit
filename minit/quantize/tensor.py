@@ -3,11 +3,11 @@ from .functional import dequantize
 from ..core.tensor import Tensor
 
 
-_Data = TypeVar("_Data")
+_Data = TypeVar("_Data", bound=Tensor)
 
 
 class QuantizedTensor(Tensor, Generic[_Data]):
-    def __init__(self, data: Tensor, group: Tensor, zero: Tensor, scale: Tensor) -> None:
+    def __init__(self, data: _Data, group: Tensor, zero: Tensor, scale: Tensor) -> None:
         super().__init__()
         self._data = data
         self._group = group

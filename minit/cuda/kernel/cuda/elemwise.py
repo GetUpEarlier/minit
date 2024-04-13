@@ -30,19 +30,18 @@ def generate_elemwise_kernel(name: str, nr_inputs: int, expr: str, dtype: str):
 using T = ${DATA_TYPE};
 static constexpr size_t nr_inputs = ${NR_INPUTS};
 
-__global__ void kernel(cuda::std::array<T*, nr_inputs> inputs, T* output, size_t nr_elements) {
-    size_t stride = blockDim.x * gridDim.x;
-    for (size_t offset = blockIdx.x * blockDim.x + threadIdx.x; offset < nr_elements; offset += stride) {
+__global__ void kernel(cuda::std::array<T*, nr_inputs> inputs, cuda::std::array<int, nr_inputs> strides, T* output, size_t nr_elements) {
+    for (size_t offset = blockIdx.x * blockDim.x + threadIdx.x; offset < nr_elements; offset += blockDim.x * gridDim.x) {
         T values[nr_inputs];
 #pragma unroll
         for (size_t i = 0; i < nr_inputs; ++i) {
-            values[i] = inputs[i][offset];
+            values[i] = __ldg(inputs[i] + offset*strides[i]);
         }
         output[offset] = ${EXPR};
     }
 }
 
-extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T** inputs, T* output, size_t nr_elements) {
+extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T** inputs, int* strides, T* output, size_t nr_elements) {
     if (nr_elements == 0) {
         return;
     }
@@ -51,14 +50,16 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T** inputs, T* output, size_
     size_t nr_blocks = (nr_elements + nr_threads_per_block - 1) / nr_threads_per_block;
     cuda::std::array<T*, nr_inputs> inputs_array;
     std::memcpy(&inputs_array, inputs, sizeof(inputs_array));
-    kernel<<<nr_blocks, nr_threads_per_block, 0, stream>>>(inputs_array, output, nr_elements);
+    cuda::std::array<int, nr_inputs> stride_array;
+    std::memcpy(&stride_array, strides, sizeof(stride_array));
+    kernel<<<nr_blocks, nr_threads_per_block, 0, stream>>>(inputs_array, stride_array, output, nr_elements);
     CUDA_ASSERT(cudaGetLastError());
 }
 """
     source = substitude(kernel_template, {
         "DATA_TYPE": dtype,
         "NR_INPUTS": str(nr_inputs),
-        "EXPR": expr,
+        "EXPR": expr.format(*[f"values[{i}]" for i in range(nr_inputs)]),
         "KERNEL_NAME": kernel_name,
     })
     kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=source))

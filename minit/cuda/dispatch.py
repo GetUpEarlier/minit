@@ -95,43 +95,46 @@ def dispatch_batch_matmul(op: BatchMatrixMultiply, a: CUDATensor, b: CUDATensor)
     return (c,)
 
 
-def register_elemwise_operators():
-    def register_elemwise_operator(op_type, op_name, op_fan_in, op_expression, op_py):
-        @register_dispatch()
-        def _register_elemwise_cuda(op: op_type, *args: CUDATensor): # type: ignore
+def register_elemwise_operator(op_type, op_name, op_fan_in, op_expression, op_py):
+    @register_dispatch()
+    def _register_elemwise_cuda(op: op_type, *args: CUDATensor): # type: ignore
+        for arg in args:
+            assert arg._shape == () or arg._shape == args[0]._shape
+            assert arg.dtype == args[0].dtype
+        c = CUDATensor.allocate(args[0]._shape, args[0].dtype)
+        kernel = generate_elemwise_kernel(op_name, op_fan_in, op_expression, get_cuda_dtype(args[0].dtype))
+        size = 1
+        for dim in args[0]._shape:
+            size *= dim
+        input_ptrs = (ctypes.c_void_p*op_fan_in)(*[arg.data_ptr for arg in args])
+        strides = (ctypes.c_int*op_fan_in)(*[0 if len(arg._shape) == 0 else 1 for arg in args])
+        kernel(None, input_ptrs, strides, ctypes.c_void_p(c.data_ptr), ctypes.c_size_t(size))
+        return (c,)
+
+    if op_py is not None:
+        @register_dispatch(predicate=lambda *args: any_cuda_tensor(*args) and any_scalar_tensor(*args))
+        def _register_elemwise_decay(op: op_type, *args: Union[CUDATensor, ScalarTensor]): # type: ignore
             for arg in args:
-                assert arg._shape == args[0]._shape
+                assert to_immediate_shape(arg.shape) == to_immediate_shape(args[0].shape)
                 assert arg.dtype == args[0].dtype
-            c = CUDATensor.allocate(args[0]._shape, args[0].dtype)
-            kernel = generate_elemwise_kernel(op_name, op_fan_in, op_expression, get_cuda_dtype(args[0].dtype))
-            size = 1
-            for dim in args[0]._shape:
-                size *= dim
-            input_ptrs = (ctypes.c_void_p*op_fan_in)(*[arg.data_ptr for arg in args])
-            kernel(None, input_ptrs, ctypes.c_void_p(c.data_ptr), ctypes.c_size_t(size))
+            items = tuple(map(lambda x: x.item(), args))
+            c_item = op_py(*items)
+            c = ScalarTensor(c_item, args[0].dtype)
             return (c,)
 
-        if op_py is not None:
-            @register_dispatch(predicate=lambda *args: any_cuda_tensor(*args) and any_scalar_tensor(*args))
-            def _register_elemwise_decay(op: op_type, *args: Union[CUDATensor, ScalarTensor]): # type: ignore
-                for arg in args:
-                    assert to_immediate_shape(arg.shape) == to_immediate_shape(args[0].shape)
-                    assert arg.dtype == args[0].dtype
-                items = tuple(map(lambda x: x.item(), args))
-                c_item = op_py(*items)
-                c = ScalarTensor(c_item, args[0].dtype)
-                return (c,)
+
+def register_elemwise_operators():
 
     for op_type, op_name, op_fan_in, op_expression, op_py in [
-        (Add, "add", 2, "values[0] + values[1]", lambda x, y: x + y),
-        (Subtract, "sub", 2, "values[0] - values[1]", lambda x, y: x - y),
-        (Multiply, "mul", 2, "values[0] * values[1]", lambda x, y: x * y),
-        (Divide, "div", 2, "values[0] / values[1]", lambda x, y: x / y),
-        (Power, "exp", 2, "values[1] == (T)2.0 ? values[0] * values[0] : values[1] == (T)0.5 ? (T)sqrt((float)values[0]) : values[1] == (T)-0.5 ? (T)rsqrt((float)values[0]) : (T)powf((float)values[0], (float)values[1])", lambda x, y: pow(x, y)),
-        (Sine, "sin", 1, "(T)sin((float)values[0])", lambda x: math.sin(x)),
-        (Cosine, "cos", 1, "(T)cos((float)values[0])", lambda x: math.cos(x)),
-        (Sigmoid, "sigmoid", 1, "values[0] > (T)0 ? 1.0 / (1.0 + expf((float)-values[0])) : (expf((float)values[0]) / (1.0 + expf((float)values[0])))", None),
-        (Exponential, "exp", 1, "expf(values[0])", lambda x: math.exp(x)),
+        (Add, "add", 2, "{0} + {1}", lambda x, y: x + y),
+        (Subtract, "sub", 2, "{0} - {1}", lambda x, y: x - y),
+        (Multiply, "mul", 2, "{0} * {1}", lambda x, y: x * y),
+        (Divide, "div", 2, "{0} / {1}", lambda x, y: x / y),
+        (Power, "exp", 2, "{1} == (T)2.0 ? {0} * {0} : {1} == (T)0.5 ? (T)sqrt((float){0}) : {1} == (T)-0.5 ? (T)rsqrt((float){0}) : (T)powf((float){0}, (float){1})", lambda x, y: pow(x, y)),
+        (Sine, "sin", 1, "(T)sin((float){0})", lambda x: math.sin(x)),
+        (Cosine, "cos", 1, "(T)cos((float){0})", lambda x: math.cos(x)),
+        (Sigmoid, "sigmoid", 1, "{0} > (T)0 ? 1.0 / (1.0 + expf((float)-{0})) : (expf((float){0}) / (1.0 + expf((float){0})))", None),
+        (Exponential, "exp", 1, "expf({0})", lambda x: math.exp(x)),
     ]:
         register_elemwise_operator(op_type, op_name, op_fan_in, op_expression, op_py)
 

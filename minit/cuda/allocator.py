@@ -41,6 +41,10 @@ extern "C" void free_cuda_memory(void* pointer) {
 extern "C" void sync_cuda() {
     CUDA_ASSERT(cudaStreamSynchronize(nullptr));
 }
+
+extern "C" void reset(void* pointer, size_t size) {
+    CUDA_ASSERT(cudaMemsetAsync(pointer, 0, size, nullptr));
+}
 """
     return gcc.compile(CXXUnit(source=source, libraries=find_cuda_libraries(), includes=[
         find_cuda_include_directory()
@@ -62,6 +66,10 @@ def copy_cuda_memory(dst: int, src: int, size: int):
 
 def sync_cuda():
     _generate_library().library.sync_cuda()
+
+
+def reset(dst: int, size: int):
+    _generate_library().library.reset(ctypes.c_void_p(dst), ctypes.c_size_t(size))
 
 
 class CUDAMemory:
@@ -88,3 +96,6 @@ class CUDAMemory:
         new = CUDAMemory(self._size)
         copy_cuda_memory(new._pointer, self._pointer, self._size)
         return new
+    
+    def reset(self):
+        reset(self._pointer, self._size)
