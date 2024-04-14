@@ -6,27 +6,35 @@ from ..core.dispatch import register_dispatch
 from ..core.operator import Operator
 
 
+@dataclass
 class Add(Operator):
     ...
 
+@dataclass
 class Subtract(Operator):
     ...
 
+@dataclass
 class Multiply(Operator):
     ...
 
+@dataclass
 class Divide(Operator):
     ...
 
+@dataclass
 class Power(Operator):
     ...
 
+@dataclass
 class Exponential(Operator):
     ...
 
+@dataclass
 class Cosine(Operator):
     ...
 
+@dataclass
 class Sine(Operator):
     ...
 

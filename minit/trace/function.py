@@ -1,6 +1,8 @@
 from typing import Any, Callable, Protocol, Tuple
 
-from .tensor import ConstantNode, InputNode, TraceGraph, TraceTensor
+from ..graph import GraphBuilder, SubGraph, Graph, TensorNodeRef
+
+from .tensor import TraceTensor
 
 from ..core.tensor import Tensor
 
@@ -10,15 +12,28 @@ class TraceableFunction(Protocol):
         ...
 
 
-def trace_function(func: TraceableFunction, args: Tuple[Tensor, ...]) -> TraceGraph:
-    graph = TraceGraph()
-    inputs = tuple(TraceTensor(InputNode(graph, i), arg) for i, arg in enumerate(args))
-    graph.inputs = tuple(inp._node for inp in inputs)
+def trace_function(func: TraceableFunction, args: Tuple[Tensor, ...]) -> SubGraph:
+    builder = GraphBuilder(Graph())
+    inputs = tuple(TraceTensor(builder, builder.create_input(), arg) for i, arg in enumerate(args))
     outputs = func(*inputs)
     output_nodes = []
     for output in outputs:
         if not isinstance(output, TraceTensor):
-            output = TraceTensor(ConstantNode(graph, output), output)
+            output = TraceTensor(builder, builder.create_constant(output), output)
         output_nodes.append(output._node)
-    graph.outputs = tuple(output_nodes)
+    graph = builder.build(*output_nodes)
     return graph
+
+
+def trace_function_on_graph(func: TraceableFunction, args: Tuple[Tensor, ...], graph: Graph, nodes: Tuple[TensorNodeRef, ...]) -> SubGraph:
+    builder = GraphBuilder(graph)
+    inputs = tuple(TraceTensor(builder, node, arg) for i, (arg, node) in enumerate(zip(args, nodes)))
+    outputs = func(*inputs)
+    output_nodes = []
+    for output in outputs:
+        if not isinstance(output, TraceTensor):
+            output = TraceTensor(builder, builder.create_constant(output), output)
+        output_nodes.append(output._node)
+    result_graph = builder.build(*output_nodes)
+    result_graph.inputs = list(nodes)
+    return result_graph
