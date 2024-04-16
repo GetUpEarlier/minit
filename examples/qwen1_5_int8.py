@@ -6,6 +6,7 @@ from typing import Tuple
 import numpy
 from minit.compiler.cxx import CXXUnit
 from minit.cuda.tensor import CUDATensor
+import minit.functional as F
 from minit.functional.generate import fill, generate_sequence
 from minit.functional.special import rms_norm, rope, sigmoid, softmax
 from minit.module import Module
@@ -226,7 +227,7 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* x, unsigned* qweight, int
 
 @nvtx.annotate("quantized_matrix_multiply")
 def quantized_matrix_multiply(x: CUDATensor, qweight: CUDATensor, zeros: CUDATensor, scales: CUDATensor, groups: CUDATensor):
-    kernel = generate_quantized_matrix_multiply("qmm", x.dtype, "float32")
+    kernel = generate_quantized_matrix_multiply("qmm", x.dtype, x.dtype)
     *ms, k0 = x.shape
     quad_k1, n0 = qweight.shape
     g0, quad_n1 = zeros.shape
@@ -242,12 +243,12 @@ def quantized_matrix_multiply(x: CUDATensor, qweight: CUDATensor, zeros: CUDATen
     n = n0
     g = g0
     assert scales.dtype == x.dtype
-    output = CUDATensor.allocate((*ms, n0), "float32")
+    output = CUDATensor.allocate((*ms, n0), x.dtype)
     output._memory.reset()
     kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(qweight.data_ptr), ctypes.c_void_p(groups.data_ptr),
            ctypes.c_void_p(zeros.data_ptr), ctypes.c_void_p(scales.data_ptr), ctypes.c_void_p(output.data_ptr), 
            ctypes.c_int(m_item), ctypes.c_int(n.item()), ctypes.c_int(k.item()), ctypes.c_int(g.item()))
-    return output.cast(x.dtype)
+    return output
 
 
 class QLinear(Module):
@@ -322,47 +323,31 @@ class Attention(Module):
         assert len(x.shape) == 3
         qkv: Tensor = self.c_attn(x)
         q, k, v = qkv.split(2, [
-            constant(self.nr_querys * self.head_size, "int32"),
-            constant(nr_key_values // 2 * self.head_size, "int32"),
-            constant(nr_key_values // 2 * self.head_size, "int32"),
+            self.nr_querys * self.head_size,
+            nr_key_values // 2 * self.head_size,
+            nr_key_values // 2 * self.head_size,
         ])
-        # b, s, h
-        q = q.expand(2, [
-            self.nr_querys,
-            self.head_size,
-        ])
-        # b, s, nr_heads, head_size
-        k = k.expand(2, [
-            nr_key_values // 2,
-            self.head_size,
-        ])
-        v = v.expand(2, [
-            nr_key_values // 2,
-            self.head_size,
-        ])
-        k = k.repeat_interleaved(2, self.nr_groups) # b, s, nr_heads, head_size
+        q = q.rearrange("bs(nd)->bsnd", dict(
+            n=self.nr_querys,
+            d=self.head_size,
+        ))
+        k = k.rearrange("bs(nd)->bsnd", dict(
+            n=nr_key_values // 2,
+            d=self.head_size,
+        ))
+        v = v.rearrange("bs(nd)->bsnd", dict(
+            n=nr_key_values // 2,
+            d=self.head_size,
+        ))
+        k = k.repeat_interleaved(2, self.nr_groups)
         v = v.repeat_interleaved(2, self.nr_groups)
-        # b, s, nr_heads, head_size
         q = rope(q, precomp_freqs_cos, precomp_freqs_sin)
         k = rope(k, precomp_freqs_cos, precomp_freqs_sin)
-        # b, s, nr_heads, head_size
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        # b, nr_heads, s, head_size
-        qk = batch_matrix_multiply(q, k)
-        # b, nr_heads, s, s
-        qk = qk / math.sqrt(self.head_size) # b, nr_heads, s, s
+        qk = F.einsum("bsnd,btnd->bnst", q, k)
+        qk = qk / math.sqrt(self.head_size)
         qk = qk + triangle_upper(fill(-math.inf, qk.shape, qk.dtype), diagonal=1)
-        v = v.transpose(1, 2)
-        v = v.transpose(2, 3)
-        # b, nr_heads, head_size, s
         qk_softmax = softmax(qk, 3)
-        output = batch_matrix_multiply(qk_softmax, v)
-        # b, nr_heads, s, head_size
-        output = output.transpose(1, 2)
-        # b, s, nr_heads, head_size
-        output = output.fold(2, 4)
-        # b, s, h
+        output = F.einsum("bnst,btnd->bs(nd)", qk_softmax, v)
         output = self.c_proj(output)
         return output
 
@@ -421,9 +406,10 @@ class Embedding(Module):
     # [B, S] . [W, H] -> [B, S, H]
     @nvtx.annotate("embedding.forward")
     def forward(self, x: Tensor) -> Tensor:
-        flatten_x = x.fold(0, len(x.shape))
+        variables = {}
+        flatten_x = x.rearrange("bs->(bs)", variables)
         output = self.weight.index(flatten_x, 0)
-        return output.expand(0, x.shape)
+        return output.rearrange("(bs)->bs", variables)
 
     # [B, S, H] . [W, H] -> [B, S, W]
     @nvtx.annotate("embedding.backward")
@@ -457,14 +443,12 @@ class LlaMa2Model(Module):
 
     def precompute_freqs(self, dim: int, size: int, theta: float) -> Tuple[Tensor, Tensor]:
         freqs = fill(1.0, (dim//2,), "float32") / fill(theta, (dim//2,), "float32") ** generate_sequence(0, dim//2, 2/dim, dtype="float32")
-        freqs = freqs.add_axis(1)
         t = generate_sequence(0, size, 1, dtype="float32")
-        t = t.add_axis(1)
-        freqs = matrix_multiply(t, freqs)
+        freqs = F.einsum("a,b->ab", t, freqs)
         freqs_cos = freqs.cosine()
         freqs_sin = freqs.sine()
-        freqs_cos = CUDATensor.from_numpy(freqs_cos.numpy().astype(getattr(numpy, default_dtype)))
-        freqs_sin = CUDATensor.from_numpy(freqs_sin.numpy().astype(getattr(numpy, default_dtype)))
+        freqs_cos = freqs_cos.cast(default_dtype)
+        freqs_sin = freqs_sin.cast(default_dtype)
         return freqs_cos, freqs_sin
 
     @nvtx.annotate("llama")

@@ -3,7 +3,7 @@
 一个轻量的推理框架
 
 ## Examples
-目前验证过Mistral-7B与Qwen-1.5-14B两个模型，examples里有完整代码
+目前验证过Mistral-7B与Qwen-1.5-14B-int8两个模型，examples里有完整代码
 
 ## Dev Plan
 持续开发中

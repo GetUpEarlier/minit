@@ -5,3 +5,4 @@ from .linalg import *
 from .reduce import *
 from .shape import *
 from .special import *
+from .einops import *

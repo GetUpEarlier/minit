@@ -40,6 +40,8 @@ def broadcast(x: Tensor, axis: int, size: Tensor) -> Tensor:
 def transpose(x: Tensor, axis_a: int, axis_b: int) -> Tensor:
     if axis_a == axis_b:
         return x
+    if axis_a > axis_b:
+        axis_a, axis_b = axis_b, axis_a
     (z,) = dispatch(Transpose(axis_a, axis_b), x)
     return z
 

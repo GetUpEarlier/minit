@@ -17,6 +17,7 @@ class NVCC(CXXCompiler):
             commands += ["-D", define]
         commands += ["-shared"]
         commands += ["--compiler-options", "-fPIC"]
+        commands += ["-gencode=arch=compute_70,code=compute_70"]
         commands += ["main.cu"]
         commands += ["-o", "library.so"]
         result = cached_execute(commands, {"main.cu": unit.source})

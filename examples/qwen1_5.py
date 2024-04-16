@@ -3,6 +3,7 @@ from typing import Dict, Tuple
 
 import numpy
 from minit.cuda.tensor import CUDATensor
+import minit.functional as F
 from minit.functional.generate import fill, generate_sequence
 from minit.functional.shape import add_axis, broadcast, fold, expand, remove_axis, repeat, repeat_interleaved, transpose
 from minit.functional.index import split, tie
@@ -81,45 +82,29 @@ class Attention(Module):
         nr_key_values = (self.nr_querys // self.nr_groups) * 2
         assert len(x.shape) == 3
         q = self.q_proj(x)
-        # b, s, h
-        q = q.expand(2, [
-            self.nr_querys,
-            self.head_size,
-        ])
-        # b, s, nr_heads, head_size
+        q = q.rearrange("bs(nd)->bsnd", dict(
+            n=self.nr_querys,
+            d=self.head_size,
+        ))
         k = self.k_proj(x)
-        k = k.expand(2, [
-            nr_key_values // 2,
-            self.head_size,
-        ])
+        k = k.rearrange("bs(nd)->bsnd", dict(
+            n=nr_key_values // 2,
+            d=self.head_size,
+        ))
         v = self.v_proj(x)
-        v = v.expand(2, [
-            nr_key_values // 2,
-            self.head_size,
-        ])
-        k = k.repeat_interleaved(2, self.nr_groups) # b, s, nr_heads, head_size
+        v = v.rearrange("bs(nd)->bsnd", dict(
+            n=nr_key_values // 2,
+            d=self.head_size,
+        ))
+        k = k.repeat_interleaved(2, self.nr_groups)
         v = v.repeat_interleaved(2, self.nr_groups)
-        # b, s, nr_heads, head_size
         q = rope(q, precomp_freqs_cos, precomp_freqs_sin)
         k = rope(k, precomp_freqs_cos, precomp_freqs_sin)
-        # b, s, nr_heads, head_size
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        # b, nr_heads, s, head_size
-        qk = batch_matrix_multiply(q, k)
-        # b, nr_heads, s, s
-        qk = qk / math.sqrt(self.head_size) # b, nr_heads, s, s
+        qk = F.einsum("bsnd,btnd->bnst", q, k)
+        qk = qk / math.sqrt(self.head_size)
         qk = qk + triangle_upper(fill(-math.inf, qk.shape, qk.dtype), diagonal=1)
-        v = v.transpose(1, 2)
-        v = v.transpose(2, 3)
-        # b, nr_heads, head_size, s
         qk_softmax = softmax(qk, 3)
-        output = batch_matrix_multiply(qk_softmax, v)
-        # b, nr_heads, s, head_size
-        output = output.transpose(1, 2)
-        # b, s, nr_heads, head_size
-        output = output.fold(2, 4)
-        # b, s, h
+        output = F.einsum("bnst,btnd->bs(nd)", qk_softmax, v)
         output = self.o_proj(output)
         return output
 

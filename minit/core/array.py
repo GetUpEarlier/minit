@@ -1,4 +1,4 @@
-from typing import Callable, Generic, List, Optional, Tuple, TypeVar
+from typing import Callable, Dict, Generic, List, Optional, Tuple, TypeVar
 
 
 _T = TypeVar("_T")
@@ -126,6 +126,10 @@ class Array(Generic[_T]):
     def cast(self, dtype: str):
         from ..functional.arith import cast
         return cast(self, dtype)
+    
+    def rearrange(self, equation: str, variables: Optional[Dict[str, _T]]=None):
+        from ..functional.einops import rearrange
+        return rearrange(equation, self, variables)
 
     __add__ = add
     __radd__ = _reversed(add)

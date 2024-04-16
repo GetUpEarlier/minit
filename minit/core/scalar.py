@@ -21,3 +21,6 @@ class ScalarTensor(Tensor):
 
     def item(self) -> Number:
         return dtype_info(self._dtype).python_type(self._value)
+    
+    def __repr__(self) -> str:
+        return f"Scalar({self._value}: {self._dtype})"
