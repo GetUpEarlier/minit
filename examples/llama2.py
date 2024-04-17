@@ -3,16 +3,9 @@ from typing import Tuple
 
 import numpy
 from minit.cuda.tensor import CUDATensor
-from minit.functional.generate import fill, generate_sequence
-from minit.functional.shape import add_axis, broadcast, fold, expand, remove_axis, repeat, repeat_interleaved, transpose
-from minit.functional.index import split, tie
-from minit.functional.special import rms_norm, rope, sigmoid, softmax
+import minit.functional as F
 from minit.module import Module
 from minit.core.tensor import Tensor
-from minit.functional.arith import add, constant, cosine, divide, exponential, power, multiply, sine, square, square_root, subtract
-from minit.functional.linalg import batch_matrix_multiply, matrix_multiply, triangle_lower, triangle_upper
-from minit.functional.index import index, slice
-from minit.functional.reduce import mean, sum, max
 from minit.module.checkpoint import load_from_torch
 from minit.module.list import ModuleList
 import minit.cuda.dispatch
@@ -27,7 +20,7 @@ def dump_tensor(name: str, x: Tensor):
     numpy.save(f"{name}_minit", x.numpy())
 
 def silu(x: Tensor) -> Tensor:
-    return multiply(x, sigmoid(x))
+    return x * F.sigmoid(x)
 
 class Linear(Module):
     weight: Tensor
@@ -37,7 +30,7 @@ class Linear(Module):
         self.weight = self.register_buffer("weight", (out_features, in_features), default_dtype)
 
     def forward(self, x: Tensor):
-        return matrix_multiply(x, self.weight)
+        return F.matrix_multiply(x, self.weight)
 
 
 class Attention(Module):
@@ -62,47 +55,28 @@ class Attention(Module):
     def forward(self, x: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor):
         nr_key_values = (self.nr_querys // self.nr_groups) * 2
         assert len(x.shape) == 3
-        q = self.wq(x)
-        # b, s, h
-        q = q.expand(2, [
-            self.nr_querys,
-            self.head_size,
-        ])
-        # b, s, nr_heads, head_size
-        k = self.wk(x)
-        k = k.expand(2, [
-            nr_key_values // 2,
-            self.head_size,
-        ])
-        v = self.wv(x)
-        v = v.expand(2, [
-            nr_key_values // 2,
-            self.head_size,
-        ])
-        k = k.repeat_interleaved(2, self.nr_groups) # b, s, nr_heads, head_size
-        v = v.repeat_interleaved(2, self.nr_groups)
-        # b, s, nr_heads, head_size
-        q = rope(q, precomp_freqs_cos, precomp_freqs_sin)
-        k = rope(k, precomp_freqs_cos, precomp_freqs_sin)
-        # b, s, nr_heads, head_size
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        # b, nr_heads, s, head_size
-        qk = batch_matrix_multiply(q, k)
-        # b, nr_heads, s, s
+        q = self.wq.forward(x).rearrange("bs(hd)->bshd", {
+            "h": self.nr_querys,
+            "d": self.head_size,
+        })
+        k = self.wk.forward(x).rearrange("bs(hd)->bs(hr)d", {
+            "h": nr_key_values // 2,
+            "d": self.head_size,
+            "r": self.nr_groups,
+        })
+        v = self.wv.forward(x).rearrange("bs(hd)->bs(hr)d", {
+            "h": nr_key_values // 2,
+            "d": self.head_size,
+            "r": self.nr_groups,
+        })
+        q = F.rope(q, precomp_freqs_cos, precomp_freqs_sin)
+        k = F.rope(k, precomp_freqs_cos, precomp_freqs_sin)
+        qk = F.einsum("bsnd,btnd->bnst", q, k)
         qk = qk / math.sqrt(self.head_size) # b, nr_heads, s, s
-        qk = qk + triangle_upper(fill(-math.inf, qk.shape, qk.dtype), diagonal=1)
-        v = v.transpose(1, 2)
-        v = v.transpose(2, 3)
-        # b, nr_heads, head_size, s
-        qk_softmax = softmax(qk, 3)
-        output = batch_matrix_multiply(qk_softmax, v)
-        # b, nr_heads, s, head_size
-        output = output.transpose(1, 2)
-        # b, s, nr_heads, head_size
-        output = output.fold(2, 4)
-        # b, s, h
-        output = self.wo(output)
+        qk = qk + F.triangle_upper(F.fill(-math.inf, qk.shape, qk.dtype), diagonal=1)
+        qk_softmax = F.softmax(qk, 3)
+        output = F.einsum("bnst,btnd->bs(nd)", qk_softmax, v)
+        output = self.wo.forward(output)
         return output
 
 
@@ -115,9 +89,9 @@ class FeedForward(Module):
 
     @nvtx.annotate("feed_forward")
     def forward(self, x: Tensor):
-        output0 = silu(self.w1(x))
-        output1 = self.w3(x)
-        output2 = self.w2(output0 * output1)
+        output0 = silu(self.w1.forward(x))
+        output1 = self.w3.forward(x)
+        output2 = self.w2.forward(output0 * output1)
         return output2
 
 
@@ -128,13 +102,8 @@ class RMSNorm(Module):
 
     @nvtx.annotate("rms_norm")
     def forward(self, x: Tensor):
-        # weight = self.weight
-        # while len(weight.shape) < len(x.shape):
-        #     weight = weight.add_axis(0, x.shape[-1-len(weight.shape)])
-        # axis = len(x.shape) - 1
-        # return rms_norm(x, weight, axis, 1e-5) * weight
         axis = len(x.shape) - 1
-        return rms_norm(x, self.weight, axis, 1e-5)
+        return F.rms_norm(x, self.weight, axis, 1e-5)
 
 
 class TransformerBlock(Module):
@@ -165,14 +134,15 @@ class Embedding(Module):
     # [B, S] . [W, H] -> [B, S, H]
     @nvtx.annotate("embedding.forward")
     def forward(self, x: Tensor) -> Tensor:
-        flatten_x = x.fold(0, len(x.shape))
+        variables = {}
+        flatten_x = x.rearrange("bs->(bs)", variables)
         output = self.weight.index(flatten_x, 0)
-        return output.expand(0, x.shape)
+        return output.rearrange("(bs)->bs", variables)
 
     # [B, S, H] . [W, H] -> [B, S, W]
     @nvtx.annotate("embedding.backward")
     def backward(self, x: Tensor) -> Tensor:
-        return matrix_multiply(x, self.weight)
+        return F.matrix_multiply(x, self.weight)
 
 class LlaMa2(Module):
     tok_embeddings: Embedding
@@ -193,23 +163,19 @@ class LlaMa2(Module):
         self.freqs_cos, self.freqs_sin = self.precompute_freqs(head_size, 1024, 1e6)
 
     def precompute_freqs(self, dim: int, size: int, theta: float) -> Tuple[Tensor, Tensor]:
-        freqs = fill(1.0, (dim//2,), "float32") / fill(theta, (dim//2,), "float32") ** generate_sequence(0, dim//2, 2/dim, dtype="float32")
-        freqs = freqs.add_axis(1)
-        t = generate_sequence(0, size, 1, dtype="float32")
-        t = t.add_axis(1)
-        freqs = matrix_multiply(t, freqs)
-        freqs_cos = freqs.cosine()
-        freqs_sin = freqs.sine()
-        freqs_cos = CUDATensor.from_numpy(freqs_cos.numpy().astype(getattr(numpy, default_dtype)))
-        freqs_sin = CUDATensor.from_numpy(freqs_sin.numpy().astype(getattr(numpy, default_dtype)))
+        freqs = (1/theta) ** F.generate_sequence(0, dim//2, 2/dim, dtype="float32")
+        t = F.generate_sequence(0, size, 1, dtype="float32")
+        freqs = F.einsum("a,b->ab", t, freqs)
+        freqs_cos = freqs.cosine().cast(default_dtype)
+        freqs_sin = freqs.sine().cast(default_dtype)
         return freqs_cos, freqs_sin
 
     @nvtx.annotate("llama")
     def forward(self, input_ids: Tensor):
         _b, s = input_ids.shape[:2]
         states = self.tok_embeddings.forward(input_ids)
-        freqs_cos = self.freqs_cos.slice(0, s, 0)
-        freqs_sin = self.freqs_sin.slice(0, s, 0)
+        freqs_cos = self.freqs_cos[:s]
+        freqs_sin = self.freqs_sin[:s]
         all_states = []
         for _i, block in enumerate(self.layers):
             all_states.append(states)
