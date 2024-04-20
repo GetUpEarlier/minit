@@ -1,7 +1,10 @@
+import builtins
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Iterable, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, Iterable, List, Optional, Sequence, Tuple, Type, TypeVar, Union
 import weakref
 from typing_extensions import Self
+import nvtx
+import graphviz
 
 from ..core.operator import Operator
 
@@ -31,25 +34,43 @@ class GraphRef:
         assert isinstance(self.graph, weakref.ref)
 
 
-@dataclass(frozen=True)
 class NodeRef(Generic[_Node]):
+    __slots__ = [
+        "graph",
+        "id",
+        "type",
+    ]
+
     graph: GraphRef
     id: int
+    type: Type[_Node]
+
+    def __init__(self, graph: GraphRef, id: int, type: Type[_Node]):
+        self.graph = graph
+        self.id = id
+        self.type = type
 
     def __call__(self) -> _Node:
         return self.graph().nodes[self.id]
-    
+
     @property
     def valid(self):
         return self.graph.valid
-    
+
     def __repr__(self) -> str:
-        return f"NodeRef({self.id})"
+        return f"NodeRef({self.id}, {self.type})"
 
 
 class NodeBase:
+    __slots__ = [
+        "graph",
+        "id",
+        "ref",
+    ]
+
     graph: "GraphRef"
     id: int
+    ref: NodeRef[Self]
 
     def __init__(self, graph: "GraphRef") -> None:
         self.graph = graph
@@ -57,13 +78,15 @@ class NodeBase:
         id = len(nodes)
         nodes.append(self)
         self.id = id
+        self.ref = NodeRef(self.graph, self.id, type(self))
 
-    @property
-    def ref(self) -> NodeRef[Self]:
-        return NodeRef(self.graph, self.id)
-    
 
 class Use():
+    __slots__ = [
+        "value",
+        "__weakref__",
+    ]
+
     def __init__(self, value: NodeRef["ValueNode"]) -> None:
         assert isinstance(value, NodeRef)
         self.value = value
@@ -80,6 +103,13 @@ class Use():
 
 
 class ValueNode(NodeBase):
+    __slots__ = [
+        "graph",
+        "id",
+        "ref",
+        "uses",
+    ]
+
     if TYPE_CHECKING:
         uses: List[weakref.ref[Use]]
     else:
@@ -105,6 +135,15 @@ class ValueNode(NodeBase):
 
 
 class OperatorNode(NodeBase):
+    __slots__ = [
+        "graph",
+        "id",
+        "ref",
+        "operator",
+        "args",
+        "outputs",
+    ]
+
     operator: Operator
     args: List["TensorNodeRef"]
     outputs: Tuple[Use, ...]
@@ -124,17 +163,33 @@ class OperatorNode(NodeBase):
 
 
 class InternalNode(ValueNode):
+    __slots__ = [
+        "graph",
+        "id",
+        "ref",
+        "uses",
+        "producer",
+        "index",
+    ]
+
     producer: "OperatorNodeRef"
     index: int
 
     def __init__(self, graph: "GraphRef", producer: "OperatorNodeRef", index: int):
         super().__init__(graph)
-        self.graph = graph
         self.producer = producer
         self.index = index
 
 
 class ConstantNode(ValueNode):
+    __slots__ = [
+        "graph",
+        "id",
+        "ref",
+        "uses",
+        "value",
+    ]
+
     value: Tensor
 
     def __init__(self, graph: "GraphRef", value: Tensor):
@@ -149,6 +204,15 @@ class PlaceholderNode(ValueNode):
 
 
 class ShapeNode(ValueNode):
+    __slots__ = [
+        "graph",
+        "id",
+        "ref",
+        "uses",
+        "source",
+        "axis",
+    ]
+
     source: Use
     axis: int
 
@@ -165,6 +229,12 @@ Node = Union[TensorNode, OperatorNode]
 
 
 class Graph:
+    __slots__ = [
+        "placeholders",
+        "nodes",
+        "__weakref__",
+    ]
+
     placeholders: List[NodeRef[PlaceholderNode]]
     nodes: List[Node]
 
@@ -180,16 +250,30 @@ class Graph:
 _T = TypeVar("_T")
 
 class LinkedList(Generic[_T]):
+    __slots__ = [
+        "head",
+        "tail",
+    ]
+
     class Node(Generic[_T]):
+        __slots__ = [
+            "value",
+            "prev",
+            "next",
+            "__weakref__",
+        ]
+
         value: Optional[_T]
         if TYPE_CHECKING:
-            prev: Optional[weakref.ref["LinkedList.Node[_T]"]] = None
+            prev: Optional[weakref.ref["LinkedList.Node[_T]"]]
         else:
-            prev: Optional[weakref.ref] = None
-        next: Optional["LinkedList.Node[_T]"] = None
+            prev: Optional[weakref.ref]
+        next: Optional["LinkedList.Node[_T]"]
 
         def __init__(self, value: Optional[_T]) -> None:
             self.value = value
+            self.prev = None
+            self.next = None
 
     def __init__(self) -> None:
         self.head = LinkedList.Node(None)
@@ -208,9 +292,17 @@ class LinkedList(Generic[_T]):
         node.next = self.tail
         node.prev = weakref.ref(tail_prev)
 
+    def tolist(self) -> List[_T]:
+        result = []
+        node = self.head.next
+        while node is not self.tail:
+            result.append(node.value)
+            node = node.next
+        return result
+
     def __iter__(self):
         node = self.head.next
-        while node != self.tail:
+        while node is not self.tail:
             yield node.value
             node = node.next
 
@@ -222,6 +314,13 @@ class LinkedList(Generic[_T]):
 
 
 class SubGraph:
+    __slots__ = [
+        "graph",
+        "inputs",
+        "operators",
+        "outputs",
+    ]
+
     graph: Graph
     inputs: List[TensorNodeRef]
     operators: LinkedList[OperatorNodeRef]
@@ -291,3 +390,35 @@ class GraphBuilder:
     def build(self, *outputs: TensorNodeRef) -> SubGraph:
         self.graph.outputs = list(map(lambda output: output().use(), outputs))
         return self.graph
+    
+
+def dump_graphviz(subgraph: SubGraph):
+    dot = graphviz.Digraph('round-table', comment='The Round Table')
+    nodes = {}
+
+    def create_node(node_ref: NodeRef):
+        if node_ref not in nodes:
+            prefix = node_ref.type.__name__
+            dot.node(f"{prefix}_{node_ref.id}")
+            nodes[node_ref] = f"{prefix}_{node_ref.id}"
+        return nodes[node_ref]
+
+    def create_edge(source: NodeRef, target: NodeRef):
+        dot.edge(create_node(source), create_node(target))
+
+    for input in subgraph.inputs:
+        create_node(input)
+
+    for operator_ref in subgraph.operators:
+        operator = operator_ref()
+        for operator_input in operator.args:
+            if operator_input.type is ShapeNode:
+                create_edge(operator_input().source.value, operator_input)
+            create_edge(operator_input, operator_ref)
+        for operator_output in operator.outputs:
+            create_edge(operator_ref, operator_output.value)
+
+    for output in subgraph.outputs:
+        create_node(output.value)
+
+    return dot

@@ -2,8 +2,18 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 
-@dataclass(frozen=True)
 class DataTypeInfo:
+    __slots__ = [
+        "name",
+        "python_type",
+        "size_in_bytes",
+    ]
+
+    def __init__(self, name: str, python_type: Optional[type], size_in_bytes: int) -> None:
+        self.name = name
+        self.python_type = python_type
+        self.size_in_bytes = size_in_bytes
+
     name: str
     python_type: Optional[type]
     size_in_bytes: int

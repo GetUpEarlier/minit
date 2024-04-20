@@ -1,10 +1,13 @@
+import ctypes
 import functools
 
-from ....compiler.template import substitude
-from ....compiler.cxx import CXXUnit
-from ....compiler.nvcc import nvcc
+from ....core.cache import cached
 
-@functools.lru_cache(maxsize=None)
+from ....compiler.template import substitude
+from ....compiler.cxx import CXXUnit, import_symbol
+from ...compiler import nvcc
+
+@cached()
 def generate_triangle_kernel(name: str, predicate: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
@@ -49,7 +52,7 @@ struct TensorIterator {
 };
 
 // input[a, b, c, d, e] -> output[a, d, c, b, e]
-__global__ void kernel(T* input, T* output, size_t a, size_t b, size_t c, size_t d) {
+__global__ void kernel(T* input, T* output, size_t diagonal, size_t a, size_t b, size_t c, size_t d) {
     size_t stride = blockDim.x * gridDim.x;
     size_t nr_elements = a * b * c * d;
     TensorIterator<4> iterator{a, b, c, d};
@@ -63,12 +66,12 @@ __global__ void kernel(T* input, T* output, size_t a, size_t b, size_t c, size_t
     }
 }
 
-extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* output, size_t a, size_t b, size_t c, size_t d) {
+extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* output, size_t diagonal, size_t a, size_t b, size_t c, size_t d) {
     static constexpr size_t nr_sms = 112;
     size_t nr_elements = a * b * c * d;
     size_t nr_threads_per_block = std::min((size_t)1024, (size_t)((nr_elements + nr_sms - 1) / nr_sms));
     size_t nr_blocks = (nr_elements + nr_threads_per_block - 1) / nr_threads_per_block;
-    kernel<<<nr_blocks, nr_threads_per_block, 0, stream>>>(input, output, a, b, c, d);
+    kernel<<<nr_blocks, nr_threads_per_block, 0, stream>>>(input, output, diagonal, a, b, c, d);
 }
 """
     source = substitude(kernel_template, {
@@ -76,5 +79,17 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* output, size_t 
         "KERNEL_NAME": kernel_name,
         "PREDICATE": predicate,
     })
-    kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=source))
-    return kernel
+    kernel = nvcc.compile(CXXUnit(source=source))
+    @import_symbol(kernel, kernel_name)
+    def entrance(
+        stream: ctypes.c_void_p,
+        input: ctypes.c_void_p,
+        output: ctypes.c_void_p,
+        diagonal: ctypes.c_size_t,
+        a: ctypes.c_size_t,
+        b: ctypes.c_size_t,
+        c: ctypes.c_size_t,
+        d: ctypes.c_size_t,
+    ):
+        ...
+    return entrance

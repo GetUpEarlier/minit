@@ -22,7 +22,7 @@ class GCC(CXXCompiler):
             commands += [library]
         result = cached_execute(commands, {"main.cpp": unit.source})
         library = ctypes.CDLL(os.path.join(result, "library.so"))
-        return CXXLibrary(library=library, entrance=unit.entrance)
+        return library
 
 
 gcc = GCC()

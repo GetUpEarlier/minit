@@ -1,10 +1,13 @@
+import ctypes
 import functools
 
-from ....compiler.template import substitude
-from ....compiler.cxx import CXXUnit
-from ....compiler.nvcc import nvcc
+from ....core.cache import cached
 
-@functools.lru_cache(maxsize=None)
+from ....compiler.template import substitude
+from ....compiler.cxx import CXXUnit, import_symbol
+from ...compiler import nvcc
+
+@cached()
 def generate_rms_norm_kernel(name: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
@@ -99,5 +102,17 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* weight, T* outp
         "DATA_TYPE": dtype,
         "KERNEL_NAME": kernel_name,
     })
-    kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=source))
-    return kernel
+    kernel = nvcc.compile(CXXUnit(source=source))
+    @import_symbol(kernel, kernel_name)
+    def entrance(
+        stream: ctypes.c_void_p,
+        input: ctypes.c_void_p,
+        weight: ctypes.c_void_p,
+        output: ctypes.c_void_p,
+        a: ctypes.c_size_t,
+        b: ctypes.c_size_t,
+        c: ctypes.c_size_t,
+        eps: ctypes.c_double,
+    ):
+        ...
+    return entrance

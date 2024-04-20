@@ -1,12 +1,15 @@
 import ctypes
 import functools
+import nvtx
+
+from ..core.cache import cached
 
 from .toolkit import find_cuda_include_directory, find_cuda_libraries
-from ..compiler.cxx import CXXUnit
+from ..compiler.cxx import CXXLibrary, CXXUnit, import_symbol
 from ..compiler.gcc import gcc
 
 
-@functools.lru_cache(maxsize=None)
+@cached()
 def _generate_library():
     source =\
 """
@@ -51,30 +54,42 @@ extern "C" void reset(void* pointer, size_t size) {
     ]))
 
 
-def allocate_cuda_memory(size: int):
-    _generate_library().library.allocate_cuda_memory.restype = ctypes.c_void_p
-    return _generate_library().library.allocate_cuda_memory(ctypes.c_size_t(size))
+_library = _generate_library()
 
 
-def free_cuda_memory(pointer: int):
-    _generate_library().library.free_cuda_memory(ctypes.c_void_p(pointer))
+@import_symbol(_library, "allocate_cuda_memory")
+def allocate_cuda_memory(size: ctypes.c_size_t) -> ctypes.c_void_p:
+    ...
 
 
-def copy_cuda_memory(dst: int, src: int, size: int):
-    _generate_library().library.copy_cuda_memory(ctypes.c_void_p(dst), ctypes.c_void_p(src), ctypes.c_size_t(size))
+@import_symbol(_library, "free_cuda_memory")
+def free_cuda_memory(pointer: ctypes.c_void_p):
+    ...
 
 
+@import_symbol(_library, "copy_cuda_memory")
+def copy_cuda_memory(dst: ctypes.c_void_p, src: ctypes.c_void_p, size: ctypes.c_size_t):
+    ...
+
+
+@import_symbol(_library, "sync_cuda")
 def sync_cuda():
-    _generate_library().library.sync_cuda()
+    ...
 
 
-def reset(dst: int, size: int):
-    _generate_library().library.reset(ctypes.c_void_p(dst), ctypes.c_size_t(size))
+@import_symbol(_library, "reset")
+def reset(dst: ctypes.c_void_p, size: ctypes.c_size_t):
+    ...
 
 
 class CUDAMemory:
-    _pointer = None
-    _size = None
+    __slots__ = [
+        "_pointer",
+        "_size",
+    ]
+
+    _pointer: int
+    _size: int
 
     def __init__(self, size: int) -> None:
         self._pointer = allocate_cuda_memory(size)
@@ -96,6 +111,7 @@ class CUDAMemory:
         new = CUDAMemory(self._size)
         copy_cuda_memory(new._pointer, self._pointer, self._size)
         return new
-    
+
+
     def reset(self):
         reset(self._pointer, self._size)

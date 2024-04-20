@@ -1,10 +1,9 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
+import nvtx
 
 from .linalg import batch_matrix_multiply, matrix_multiply
-
 from .utils import _convert_scalar
-
 from ..graph import SubGraph
 from ..core.tensor import Tensor
 
@@ -13,6 +12,10 @@ __all__ = [
     "einsum",
     "rearrange",
 ]
+
+ShapeTerm = Union[List[str], str]
+ShapeSpec = List[ShapeTerm]
+ShapeSpecs = List[ShapeSpec]
 
 
 def parse_equation_term(term: str):
@@ -27,6 +30,10 @@ def parse_equation_term(term: str):
                 subdims.append(term[i])
                 i += 1
             dims.append(subdims)
+        elif term[i] == ".":
+            assert term[i:i+3] == "..."
+            i += 2
+            dims.append("...")
         else:
             assert term[i].isalpha()
             dims.append(term[i])
@@ -34,7 +41,7 @@ def parse_equation_term(term: str):
     return dims
 
 
-def serialize_spec(spec: List[Union[List[str], str]]):
+def serialize_spec(spec: ShapeSpec):
     term = ""
     for dim in spec:
         if isinstance(dim, list):
@@ -47,7 +54,7 @@ def serialize_spec(spec: List[Union[List[str], str]]):
     return term
 
 
-def flatten_spec(spec: List[Union[List[str], str]]):
+def flatten_spec(spec: ShapeSpec):
     flatten_spec = []
     for dim in spec:
         if isinstance(dim, list):
@@ -59,18 +66,49 @@ def flatten_spec(spec: List[Union[List[str], str]]):
     return flatten_spec
 
 
-def parse_equation(equation: str) -> Tuple[List[List[Union[List[str], str]]], List[Union[List[str], str]]]:
+def parse_equation(equation: str) -> List[ShapeSpecs]:
     [args, output] = equation.split("->")
     args = args.split(",")
-    input_specs = list(map(parse_equation_term, args))
+    input_specs = [parse_equation_term(arg) for arg in args]
     output_spec = parse_equation_term(output)
-    return input_specs, output_spec
+    return [input_specs, [output_spec]]
 
 
+def deduce_ellipsis(arg_specs: ShapeSpecs, args: Tuple[Tensor, ...]) -> Optional[List[str]]:
+    ellipsis = None
+    for arg_spec, arg in zip(arg_specs, args):
+        for dim in arg_spec:
+            if dim == "...":
+                ellipsis_size = len(arg.shape) - (len(arg_spec)-1)
+                assert ellipsis_size >= 0
+                assert ellipsis is None
+                ellipsis = [f".{i}" for i in range(ellipsis_size)]
+    return ellipsis
+
+
+def expand_ellipsis(specs: ShapeSpecs, ellipsis: Optional[List[str]]):
+    if ellipsis is None:
+        return
+    count = 0
+    for spec in specs:
+        for i in range(len(spec)):
+            if spec[i] == "...":
+                new_spec = spec[:i] + ellipsis + spec[i+1:]
+                spec.clear()
+                spec.extend(new_spec)
+                count += 1
+    return count
+
+
+@nvtx.annotate("einsum")
 def einsum(equation: str, *args: Tensor, variables: Optional[Dict[str, Tensor]]=None):
     if variables is None:
         variables = {}
-    input_specs, output_spec = parse_equation(equation)
+    input_specs, output_specs = parse_equation(equation)
+    ellipsis = deduce_ellipsis(input_specs, args)
+    expand_ellipsis(input_specs, ellipsis)
+    expand_ellipsis(output_specs, ellipsis)
+    [output_spec] = output_specs
     flatten_input_specs = list(map(flatten_spec, input_specs))
     flatten_output_spec = flatten_spec(output_spec)
     dim_counts = defaultdict(lambda: 0)
@@ -151,6 +189,9 @@ def rearrange_impl(input_spec, output_spec, x: Tensor, variables: Dict[str, Tens
     flatten_input_spec = flatten_spec(input_spec)
     flatten_output_spec = flatten_spec(output_spec)
     for i, dim in enumerate(flatten_output_spec):
+        if dim not in flatten_input_spec:
+            flatten_input_spec.insert(i, dim)
+            x = x.add_axis(i, variables[dim])
         if flatten_input_spec[i] == dim:
             continue
         j = flatten_input_spec.index(dim)
@@ -164,10 +205,15 @@ def rearrange_impl(input_spec, output_spec, x: Tensor, variables: Dict[str, Tens
     return x
 
 
-def rearrange(equation: str, x: Tensor, variables: Optional[Dict[str, Tensor]]=None):
+@nvtx.annotate("rearrange")
+def rearrange(equation: str, x: Tensor, variables: Optional[Dict[str, Tensor]]=None) -> Tensor:
     if variables is None:
         variables = {}
-    input_specs, output_spec = parse_equation(equation)
+    input_specs, output_specs = parse_equation(equation)
+    ellipsis = deduce_ellipsis(input_specs, (x,))
+    expand_ellipsis(input_specs, ellipsis)
+    expand_ellipsis(output_specs, ellipsis)
+    [output_spec] = output_specs
     assert len(input_specs) == 1
     input_spec = input_specs[0]
     return rearrange_impl(input_spec, output_spec, x, variables)

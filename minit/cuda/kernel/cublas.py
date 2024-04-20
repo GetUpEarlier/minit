@@ -1,12 +1,15 @@
+import ctypes
 import functools
 import os
 
+from ...core.cache import cached
+
 from ...compiler.template import substitude
-from ...compiler.cxx import CXXUnit
+from ...compiler.cxx import CXXUnit, import_symbol
 from ...compiler.gcc import gcc
 from ..toolkit import find_cuda_include_directory, get_cuda_home
 
-@functools.lru_cache(maxsize=None)
+@cached()
 def generate_cublas_kernel(name: str, dtype: str):
     kernel_name = f"minit_{name}"
     kernel_template =\
@@ -121,8 +124,21 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, void* a, void* b, void* c, s
             "__nv_bfloat16": "CUBLAS_COMPUTE_32F",
         }[dtype]
     })
-    kernel = gcc.compile(CXXUnit(entrance=kernel_name, source=source, includes=[find_cuda_include_directory()], libraries=[
+    kernel = gcc.compile(CXXUnit(source=source, includes=[find_cuda_include_directory()], libraries=[
         os.path.join(get_cuda_home(), "lib64", "libcublasLt.so"),
         os.path.join(get_cuda_home(), "lib64", "libcudart.so"),
     ]))
-    return kernel
+    @import_symbol(kernel, kernel_name)
+    def entrance(
+        stream: ctypes.c_void_p,
+        a: ctypes.c_void_p,
+        b: ctypes.c_void_p,
+        c: ctypes.c_void_p,
+        batch: ctypes.c_size_t,
+        m: ctypes.c_size_t,
+        n: ctypes.c_size_t,
+        k: ctypes.c_size_t,
+        workspace: ctypes.c_void_p,
+    ):
+        ...
+    return entrance

@@ -126,7 +126,7 @@ class Array(Generic[_T]):
     def cast(self, dtype: str):
         from ..functional.arith import cast
         return cast(self, dtype)
-    
+
     def rearrange(self, equation: str, variables: Optional[Dict[str, _T]]=None):
         from ..functional.einops import rearrange
         return rearrange(equation, self, variables)
@@ -141,3 +141,20 @@ class Array(Generic[_T]):
     __rtruediv__ = _reversed(divide)
     __pow__ = power
     __rpow__ = _reversed(power)
+
+    def __getitem__(self, index) -> _T:
+        assert not isinstance(index, tuple)
+        if isinstance(index, slice):
+            assert index.step is None
+            if index.start is None:
+                if index.stop is None:
+                    return self
+                else:
+                    return self.slice(0, index.stop, 0)
+            else:
+                if index.stop is None:
+                    return self.slice(index.start, self.shape[0], 0)
+                else:
+                    return self.slice(index.start, index.stop, 0)
+        else:
+            return self.slice(index, index+1, 0).remove_axis(0)

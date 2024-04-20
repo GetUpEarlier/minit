@@ -3,17 +3,19 @@ from dataclasses import dataclass
 from ..core.operator import Operator
 
 
+@dataclass
 class MatrixMultiply(Operator):
     ...
 
 
+@dataclass
 class BatchMatrixMultiply(Operator):
     ...
 
 
 @dataclass
 class TriangleUpper(Operator):
-    diagonal: int
+    pass
 
 
 @dataclass

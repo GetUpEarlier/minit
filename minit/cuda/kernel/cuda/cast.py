@@ -1,10 +1,13 @@
+import ctypes
 import functools
 
-from ....compiler.template import substitude
-from ....compiler.cxx import CXXUnit
-from ....compiler.nvcc import nvcc
+from ....core.cache import cached
 
-@functools.lru_cache(maxsize=None)
+from ....compiler.template import substitude
+from ....compiler.cxx import CXXUnit, import_symbol
+from ...compiler import nvcc
+
+@cached()
 def generate_cast_kernel(name: str, source_dtype: str, target_dtype: str):
     kernel_name = f"minit_cast_{name}"
     kernel_template =\
@@ -54,5 +57,13 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, source_type* input, target_t
         "TARGET_TYPE": target_dtype,
         "KERNEL_NAME": kernel_name,
     })
-    kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=source))
-    return kernel
+    kernel = nvcc.compile(CXXUnit(source=source))
+    @import_symbol(kernel, kernel_name)
+    def entrance(
+        stream: ctypes.c_void_p,
+        input: ctypes.c_void_p,
+        output: ctypes.c_void_p,
+        nr_elements: ctypes.c_size_t,
+    ):
+        ...
+    return entrance

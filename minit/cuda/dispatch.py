@@ -32,6 +32,8 @@ from ..core.dispatch import register_dispatch
 from .kernel.cublas import generate_cublas_kernel
 from .kernel.utils import get_cuda_dtype
 
+import nvtx
+
 def any_cuda_tensor(*args):
     for arg in args:
         if arg == CUDATensor:
@@ -60,13 +62,13 @@ def dispatch_matmul(op: MatrixMultiply, a: CUDATensor, b: CUDATensor):
     kernel = generate_cublas_kernel("gemm", get_cuda_dtype(a.dtype))
     kernel(
         None,
-        ctypes.c_void_p(a.data_ptr),
-        ctypes.c_void_p(b.data_ptr),
-        ctypes.c_void_p(c.data_ptr),
-        ctypes.c_size_t(1),
-        ctypes.c_size_t(m),
-        ctypes.c_size_t(n),
-        ctypes.c_size_t(k0),
+        a.data_ptr,
+        b.data_ptr,
+        c.data_ptr,
+        1,
+        m,
+        n,
+        k0,
         None,
     )
     return (c,)
@@ -83,13 +85,13 @@ def dispatch_batch_matmul(op: BatchMatrixMultiply, a: CUDATensor, b: CUDATensor)
     kernel = generate_cublas_kernel("gemm", get_cuda_dtype(a.dtype))
     kernel(
         None,
-        ctypes.c_void_p(a.data_ptr),
-        ctypes.c_void_p(b.data_ptr),
-        ctypes.c_void_p(c.data_ptr),
-        ctypes.c_size_t(b0),
-        ctypes.c_size_t(m),
-        ctypes.c_size_t(n),
-        ctypes.c_size_t(k0),
+        a.data_ptr,
+        b.data_ptr,
+        c.data_ptr,
+        b0,
+        m,
+        n,
+        k0,
         None,
     )
     return (c,)
@@ -100,15 +102,15 @@ def register_elemwise_operator(op_type, op_name, op_fan_in, op_expression, op_py
     def _register_elemwise_cuda(op: op_type, *args: CUDATensor): # type: ignore
         for arg in args:
             assert arg._shape == () or arg._shape == args[0]._shape
-            assert arg.dtype == args[0].dtype
-        c = CUDATensor.allocate(args[0]._shape, args[0].dtype)
+            assert arg._dtype == args[0]._dtype
+        c = CUDATensor.allocate(args[0]._shape, args[0]._dtype)
         kernel = generate_elemwise_kernel(op_name, op_fan_in, op_expression, get_cuda_dtype(args[0].dtype))
         size = 1
         for dim in args[0]._shape:
             size *= dim
         input_ptrs = (ctypes.c_void_p*op_fan_in)(*[arg.data_ptr for arg in args])
         strides = (ctypes.c_int*op_fan_in)(*[0 if len(arg._shape) == 0 else 1 for arg in args])
-        kernel(None, input_ptrs, strides, ctypes.c_void_p(c.data_ptr), ctypes.c_size_t(size))
+        kernel(None, input_ptrs, strides, c.data_ptr, size)
         return (c,)
 
     if op_py is not None:
@@ -117,7 +119,7 @@ def register_elemwise_operator(op_type, op_name, op_fan_in, op_expression, op_py
             for arg in args:
                 assert to_immediate_shape(arg.shape) == to_immediate_shape(args[0].shape)
                 assert arg.dtype == args[0].dtype
-            items = tuple(map(lambda x: x.item(), args))
+            items = [arg.item() for arg in args]
             c_item = op_py(*items)
             c = ScalarTensor(c_item, args[0].dtype)
             return (c,)
@@ -154,7 +156,7 @@ def register_reduce_operators():
             b = x._shape[op.axis]
             for dim in x._shape[op.axis+1:]:
                 c *= dim
-            kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(z.data_ptr), ctypes.c_size_t(a), ctypes.c_size_t(b), ctypes.c_size_t(c))
+            kernel(None, x.data_ptr, z.data_ptr, a, b, c)
             return (z,)
     for op_type, op_name, op_init, op_expr in [
         (Sum, "sum", "0", "cub::Sum()"),
@@ -174,7 +176,7 @@ def register_fill(op: Fill, *sizes: Tensor):
         size *= dim
     c = CUDATensor.allocate(tuple(sizes), op.dtype)
     kernel = generate_fill_kernel("fill", get_cuda_dtype(op.dtype))
-    kernel(None, ctypes.c_void_p(c.data_ptr), ctypes.c_size_t(size), ctypes.c_double(op.value))
+    kernel(None, c.data_ptr, size, op.value)
     return (c,)
 
 
@@ -191,10 +193,10 @@ def register_sequence(op: GenerateSequence, start: Tensor, size: Tensor, step: T
     kernel = generate_sequence_kernel("sequence", get_cuda_dtype(start.dtype))
     kernel(
         None,
-        ctypes.c_void_p(output.data_ptr),
-        ctypes.c_void_p(start.data_ptr),
-        ctypes.c_void_p(step.data_ptr),
-        ctypes.c_size_t(size_value),
+        output.data_ptr,
+        start.data_ptr,
+        step.data_ptr,
+        size_value,
     )
     return (output,)
 
@@ -226,13 +228,15 @@ def register_fold(op: Fold, x: CUDATensor):
 
 @register_dispatch()
 def register_expand(op: Expand, x: CUDATensor, *sizes: Tensor):
+    axis = op.axis
+    shape = x._shape
     sizes = to_immediate_shape(sizes)
     size = 1
     for dim in sizes:
         size *= dim
-    assert size == x._shape[op.axis]
-    shape = x._shape[:op.axis] + sizes + x._shape[op.axis+1:]
-    z = CUDATensor.wrap(shape, x.dtype, x.memory)
+    assert size == shape[axis]
+    shape = shape[:axis] + sizes + shape[axis+1:]
+    z = CUDATensor.wrap(shape, x._dtype, x._memory)
     return (z,)
 
 
@@ -250,11 +254,11 @@ def register_broadcast(op: Broadcast, x: CUDATensor, size: Tensor):
     kernel = generate_broadcast_kernel("broadcast", get_cuda_dtype(x.dtype))
     kernel(
         None,
-        ctypes.c_void_p(x.data_ptr),
-        ctypes.c_void_p(z.data_ptr),
-        ctypes.c_size_t(a),
-        ctypes.c_size_t(b),
-        ctypes.c_size_t(c),
+        x.data_ptr,
+        z.data_ptr,
+        a,
+        b,
+        c,
     )
     return (z,)
 
@@ -273,13 +277,13 @@ def register_index(op: Index, x: CUDATensor, index: CUDATensor):
     z = CUDATensor.allocate(x._shape[:op.axis] + (c,) + x._shape[op.axis+1:], x.dtype)
     kernel = generate_index_kernel("index", get_cuda_dtype(x.dtype))
     kernel(None,
-           ctypes.c_void_p(x.data_ptr),
-           ctypes.c_void_p(index.data_ptr),
-           ctypes.c_void_p(z.data_ptr),
-           ctypes.c_size_t(a),
-           ctypes.c_size_t(b),
-           ctypes.c_size_t(c),
-           ctypes.c_size_t(d)
+           x.data_ptr,
+           index.data_ptr,
+           z.data_ptr,
+           a,
+           b,
+           c,
+           d,
     )
     return (z,)
 
@@ -300,13 +304,13 @@ def register_slice(op: Slice, x: CUDATensor, start: Tensor, stop: Tensor):
     z = CUDATensor.allocate(x._shape[:op.axis] + ((stop - start),) + x._shape[op.axis+1:], x.dtype)
     kernel = generate_slice_kernel("slice", get_cuda_dtype(x.dtype))
     kernel(None,
-           ctypes.c_void_p(x.data_ptr),
-           ctypes.c_void_p(z.data_ptr),
-           ctypes.c_size_t(a),
-           ctypes.c_size_t(b),
-           ctypes.c_size_t(c),
-           ctypes.c_size_t(start),
-           ctypes.c_size_t(stop),
+           x.data_ptr,
+           z.data_ptr,
+           a,
+           b,
+           c,
+           start,
+           stop,
     )
     return (z,)
 
@@ -331,13 +335,13 @@ def register_tie(op: Tie, *args: CUDATensor):
         start = offset
         stop = start + arg._shape[op.axis]
         kernel(None,
-            ctypes.c_void_p(arg.data_ptr),
-            ctypes.c_void_p(z.data_ptr),
-            ctypes.c_size_t(a),
-            ctypes.c_size_t(b),
-            ctypes.c_size_t(c),
-            ctypes.c_size_t(start),
-            ctypes.c_size_t(stop),
+            arg.data_ptr,
+            z.data_ptr,
+            a,
+            b,
+            c,
+            start,
+            stop,
         )
         offset = stop
     return (z,)
@@ -361,59 +365,59 @@ def register_transpose(op: Transpose, x: CUDATensor):
     kernel = generate_transpose_kernel("transpose", get_cuda_dtype(x.dtype))
     kernel(
         None,
-        ctypes.c_void_p(x.data_ptr),
-        ctypes.c_void_p(z.data_ptr),
-        ctypes.c_size_t(a),
-        ctypes.c_size_t(b),
-        ctypes.c_size_t(c),
-        ctypes.c_size_t(d),
-        ctypes.c_size_t(e),
+        x.data_ptr,
+        z.data_ptr,
+        a,
+        b,
+        c,
+        d,
+        e,
     )
     return (z,)
 
 
 @register_dispatch()
-def register_triangle_upper(op: TriangleUpper, x: CUDATensor):
+def register_triangle_upper(op: TriangleUpper, x: CUDATensor, diagonal: Tensor):
     a, b, c, d = 1, 1, 1, 1
     for dim in x._shape[:-2]:
         a *= dim
     b = x._shape[-2]
     c = x._shape[-1]
-    assert b == c
     z = CUDATensor.allocate(x._shape, x.dtype)
-    diagonal = op.diagonal
-    kernel = generate_triangle_kernel("triangle_upper", f"index[1] + {diagonal} <= index[2]", get_cuda_dtype(x.dtype))
+    diagonal = diagonal.item()
+    kernel = generate_triangle_kernel("triangle_upper", f"index[1] + diagonal <= index[2]", get_cuda_dtype(x.dtype))
     kernel(
         None,
-        ctypes.c_void_p(x.data_ptr),
-        ctypes.c_void_p(z.data_ptr),
-        ctypes.c_size_t(a),
-        ctypes.c_size_t(b),
-        ctypes.c_size_t(c),
-        ctypes.c_size_t(d),
+        x.data_ptr,
+        z.data_ptr,
+        diagonal,
+        a,
+        b,
+        c,
+        d,
     )
     return (z,)
 
 
 @register_dispatch()
-def register_triangle_lower(op: TriangleLower, x: CUDATensor):
+def register_triangle_lower(op: TriangleLower, x: CUDATensor, diagonal: Tensor):
     a, b, c, d = 1, 1, 1, 1
     for dim in x._shape[:-2]:
         a *= dim
     b = x._shape[-2]
     c = x._shape[-1]
-    assert b == c
     z = CUDATensor.allocate(x._shape, x.dtype)
-    diagonal = op.diagonal
-    kernel = generate_triangle_kernel("triangle_lower", f"index[1] > index[2] + {diagonal}", get_cuda_dtype(x.dtype))
+    diagonal = diagonal.item()
+    kernel = generate_triangle_kernel("triangle_lower", f"index[1] > index[2] + diagonal", get_cuda_dtype(x.dtype))
     kernel(
         None,
-        ctypes.c_void_p(x.data_ptr),
-        ctypes.c_void_p(z.data_ptr),
-        ctypes.c_size_t(a),
-        ctypes.c_size_t(b),
-        ctypes.c_size_t(c),
-        ctypes.c_size_t(d),
+        x.data_ptr,
+        z.data_ptr,
+        diagonal,
+        a,
+        b,
+        c,
+        d,
     )
     return (z,)
 
@@ -430,7 +434,7 @@ def register_rms_norm_operator(op: RMSNorm, x: CUDATensor, weight: CUDATensor):
         c *= dim
     assert len(weight._shape) == 1
     assert weight._shape[0] == b
-    kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(weight.data_ptr), ctypes.c_void_p(z.data_ptr), ctypes.c_size_t(a), ctypes.c_size_t(b), ctypes.c_size_t(c), ctypes.c_double(op.eps))
+    kernel(None, x.data_ptr, weight.data_ptr, z.data_ptr, a, b, c, op.eps)
     return (z,)
 
 
@@ -441,14 +445,14 @@ def register_rope_operator(op: RoPE, x: CUDATensor, freqs_cos: CUDATensor, freqs
     kernel = generate_rope_kernel("rope", get_cuda_dtype(x.dtype))
     kernel(
         None,
-        ctypes.c_void_p(x.data_ptr),
-        ctypes.c_void_p(freqs_cos.data_ptr),
-        ctypes.c_void_p(freqs_sin.data_ptr),
-        ctypes.c_void_p(z.data_ptr),
-        ctypes.c_size_t(bs),
-        ctypes.c_size_t(seqlen),
-        ctypes.c_size_t(nh),
-        ctypes.c_size_t(hs)
+        x.data_ptr,
+        freqs_cos.data_ptr,
+        freqs_sin.data_ptr,
+        z.data_ptr,
+        bs,
+        seqlen,
+        nh,
+        hs,
     )
     return (z,)
 
@@ -463,7 +467,7 @@ def register_softmax_operator(op: Softmax, x: CUDATensor):
     b = x._shape[op.axis]
     for dim in x._shape[op.axis+1:]:
         c *= dim
-    kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(z.data_ptr), ctypes.c_size_t(a), ctypes.c_size_t(b), ctypes.c_size_t(c))
+    kernel(None, x.data_ptr, z.data_ptr, a, b, c)
     return (z,)
 
 
@@ -486,5 +490,5 @@ def register_cast_operator(op: Cast, x: CUDATensor): # type: ignore
     size = 1
     for dim in x._shape:
         size *= dim
-    kernel(None, ctypes.c_void_p(x.data_ptr) , ctypes.c_void_p(c.data_ptr), ctypes.c_size_t(size))
+    kernel(None, x.data_ptr, c.data_ptr, size)
     return (c,)

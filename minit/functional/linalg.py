@@ -33,11 +33,13 @@ def batch_matrix_multiply(x: Tensor, y: Tensor):
     return z
 
 
-def triangle_upper(x: Tensor, diagonal: int):
-    (z,) = dispatch(TriangleUpper(diagonal), x)
+def triangle_upper(x: Tensor, diagonal: Tensor):
+    (diagonal,) = _convert_scalar(diagonal)
+    (z,) = dispatch(TriangleUpper(), x, diagonal)
     return z
 
 
-def triangle_lower(x: Tensor, diagonal: int):
-    (z,) = dispatch(TriangleLower(diagonal), x)
+def triangle_lower(x: Tensor, diagonal: Tensor):
+    (diagonal,) = _convert_scalar(diagonal)
+    (z,) = dispatch(TriangleLower(), x, diagonal)
     return z

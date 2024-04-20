@@ -5,6 +5,11 @@ from .tensor import Tensor
 
 
 class ScalarTensor(Tensor):
+    __slots__ = [
+        "_value",
+        "_dtype",
+    ]
+
     def __init__(self, value: Number, dtype: str) -> None:
         super().__init__()
         assert not isinstance(value, Tensor)
@@ -21,6 +26,9 @@ class ScalarTensor(Tensor):
 
     def item(self) -> Number:
         return dtype_info(self._dtype).python_type(self._value)
-    
+
     def __repr__(self) -> str:
         return f"Scalar({self._value}: {self._dtype})"
+
+    def type(self):
+        return ScalarTensor

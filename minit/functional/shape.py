@@ -7,6 +7,8 @@ from .utils import _convert_scalar
 
 
 def fold(x: Tensor, start: int, stop: int) -> Tensor:
+    if stop - start == 1:
+        return x
     (z,) = dispatch(Fold(start=start, stop=stop), x)
     return z
 

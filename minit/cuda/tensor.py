@@ -1,23 +1,39 @@
 from numbers import Number
 from typing import Optional, Tuple
 
+from ..core.scalar import ScalarTensor
+
 from ..core.shape import to_immediate_shape, to_symbolic_shape
 from ..core.dtype import dtype_info
 from ..core.tensor import Tensor
 from .allocator import CUDAMemory, copy_cuda_memory, sync_cuda
 
 import numpy
+import nvtx
 
 
 class CUDATensor(Tensor):
-    _memory: Optional[CUDAMemory] = None
+    __slots__ = [
+        "_memory",
+        "_shape",
+        "_item",
+        "_dtype",
+    ]
+
+    _memory: Optional[CUDAMemory]
     _shape: Tuple[int, ...]
-    _item: Optional[Number] = None
+    _item: Optional[Number]
     _dtype: str
+
+    def __init__(self, shape: Tuple[int, ...], dtype: str) -> None:
+        self._memory = None
+        self._item = None
+        self._shape = shape
+        self._dtype = dtype
 
     @property
     def shape(self) -> Tuple[Tensor, ...]:
-        return to_symbolic_shape(self._shape)
+        return tuple([ScalarTensor(dim, "int32") for dim in self._shape])
 
     @property
     def dtype(self) -> str:
@@ -36,29 +52,24 @@ class CUDATensor(Tensor):
 
     @staticmethod
     def allocate(shape: Tuple[int, ...], dtype: str) -> "CUDATensor":
-        shape = to_immediate_shape(shape)
         size = dtype_info(dtype).size_in_bytes
         for dim in shape:
-            assert not isinstance(dim, Tensor)
+            assert isinstance(dim, int)
             size *= dim
         memory = CUDAMemory(size)
-        result = CUDATensor()
-        result._shape = shape
+        result = CUDATensor(shape, dtype)
         result._memory = memory
-        result._dtype = dtype
         return result
 
     @staticmethod
     def wrap(shape: Tuple[int, ...], dtype: str, memory: CUDAMemory) -> "CUDATensor":
-        shape = to_immediate_shape(shape)
         size = dtype_info(dtype).size_in_bytes
         for dim in shape:
+            assert isinstance(dim, int)
             size *= dim
         assert memory._size == size
-        result = CUDATensor()
-        result._shape = shape
+        result = CUDATensor(shape, dtype)
         result._memory = memory
-        result._dtype = dtype
         return result
 
     @staticmethod
@@ -70,10 +81,8 @@ class CUDATensor(Tensor):
 
     @staticmethod
     def from_item(item: Number, dtype: str):
-        result = CUDATensor()
-        result._shape = ()
+        result = CUDATensor((), dtype)
         result._item = item
-        result._dtype = dtype
         return result
 
     def copy_from_numpy(self, array: numpy.ndarray):
@@ -113,3 +122,6 @@ class CUDATensor(Tensor):
             return dtype_info(self.dtype).python_type(self._item)
         else:
             return self.numpy().item()
+    
+    def type(self):
+        return CUDATensor

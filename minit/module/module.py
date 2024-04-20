@@ -1,4 +1,5 @@
 from typing import Any, Dict, Generic, Optional, Set, Tuple, TypeVar
+from typing_extensions import Self
 
 from ..core.tensor import Tensor
 from ..core.meta import MetaTensor
@@ -66,5 +67,5 @@ class Module(Generic[_Parent]):
             else:
                 setattr(self, name, value)
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self: Self, *args, **kwargs):
         return self.forward(*args, **kwargs)

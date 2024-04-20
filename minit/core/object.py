@@ -6,7 +6,6 @@ from typing_extensions import Self
 
 
 class Object:
-    @property
     def type(self) -> Type[Self]:
         raise NotImplementedError()
 

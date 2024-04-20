@@ -1,7 +1,8 @@
+import os
 from typing import Dict, List
+import json
 
 from ..core.shape import to_immediate_shape
-
 from ..cuda.tensor import CUDATensor
 from .module import Module
 
@@ -33,3 +34,10 @@ def load_from_safetensors(model: Module, paths: List[str]):
                 assert array.shape == shape
                 model.update_buffer(key, CUDATensor.from_numpy(array))
     return model
+
+
+def load_from_safetensors_index(model: Module, path: str):
+    with open(path) as f:
+        index = json.load(f)
+    parts = list(map(lambda part: os.path.join(os.path.dirname(path), part), dict.fromkeys(index["weight_map"].values())))
+    load_from_safetensors(model, parts)

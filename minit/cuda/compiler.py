@@ -1,9 +1,9 @@
 import ctypes
 import os
 
-from .cache import cached_execute
-from .cxx import CXXCompiler, CXXLibrary, CXXUnit
-from ..cuda.toolkit import get_cuda_home
+from ..compiler.cache import cached_execute
+from ..compiler.cxx import CXXCompiler, CXXLibrary, CXXUnit
+from .toolkit import get_cuda_home
 
 
 class NVCC(CXXCompiler):
@@ -22,7 +22,7 @@ class NVCC(CXXCompiler):
         commands += ["-o", "library.so"]
         result = cached_execute(commands, {"main.cu": unit.source})
         library = ctypes.CDLL(os.path.join(result, "library.so"))
-        return CXXLibrary(library=library, entrance=unit.entrance)
+        return library
 
 
 nvcc = NVCC()
