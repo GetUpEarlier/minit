@@ -21,6 +21,6 @@ def find_cuda_include_directory():
 
 def find_cuda_libraries():
     libraries = [
-        os.path.join(find_cuda_library_directory(), "libcudart.so")
+        os.path.join(find_cuda_library_directory(), "libcudart.so"),
     ]
     return libraries
