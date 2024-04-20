@@ -6,9 +6,10 @@ import numpy
 import torch
 from minit.cuda.tensor import CUDATensor
 import minit.functional as F
+from minit.graph import dump_graphviz
 from minit.module import Module
 from minit.core.tensor import Tensor
-from minit.module.checkpoint import load_from_safetensors_index
+from minit.module.checkpoint import load_from_torch, load_from_safetensors_index
 from minit.module.list import ModuleList
 import minit.cuda.dispatch
 import nvtx
@@ -18,8 +19,11 @@ from minit.chat.sample import Top1Sampler
 from minit.chat.template import Template
 from minit.chat.tokenizer import HuggingFaceTokenizer
 from minit.chat.agent import Agent, chat_cmdline
+from minit.trace.function import trace_function
+from minit.trace.executor import TraceGraphExecutor
+import minit.trace.dispatch
 
-default_dtype = "float16"
+default_dtype = "float32"
 
 def debug_tensor(name: str, x: Tensor):
     print(f"{name} mean: {x.numpy().astype(numpy.float32).mean()} var: {x.numpy().astype(numpy.float32).var()}")
@@ -41,23 +45,6 @@ class Linear(Module):
         return F.matrix_multiply(x, self.weight)
 
 
-class LinearWithBias(Module):
-    weight: Tensor
-
-    def __init__(self, in_features: int, out_features: int) -> None:
-        super().__init__()
-        self.weight = self.register_buffer("weight", (out_features, in_features), default_dtype)
-        self.bias = self.register_buffer("bias", (out_features,), default_dtype)
-
-    def forward(self, x: Tensor):
-        output = F.matrix_multiply(x, self.weight)
-        bias = self.bias
-        while len(bias.shape) < len(x.shape):
-            bias = bias.add_axis(0, x.shape[-1-len(bias.shape)])
-        output += bias
-        return output
-
-
 class Attention(Module):
     hidden_size: int
     nr_querys: int
@@ -71,9 +58,9 @@ class Attention(Module):
         self.nr_querys = nr_querys
         self.nr_groups = nr_groups
         self.head_size = head_size
-        self.q_proj = self.register_module("q_proj", LinearWithBias(hidden_size, nr_querys * head_size))
-        self.k_proj = self.register_module("k_proj", LinearWithBias(hidden_size, nr_key_values // 2 * head_size))
-        self.v_proj = self.register_module("v_proj", LinearWithBias(hidden_size, nr_key_values // 2 * head_size))
+        self.q_proj = self.register_module("q_proj", Linear(hidden_size, nr_querys * head_size))
+        self.k_proj = self.register_module("k_proj", Linear(hidden_size, nr_key_values // 2 * head_size))
+        self.v_proj = self.register_module("v_proj", Linear(hidden_size, nr_key_values // 2 * head_size))
         self.o_proj = self.register_module("o_proj", Linear(nr_querys * head_size, hidden_size))
 
     @nvtx.annotate("attention")
@@ -141,7 +128,7 @@ class RMSNorm(Module):
     @nvtx.annotate("rms_norm")
     def forward(self, x: Tensor):
         axis = len(x.shape) - 1
-        return F.rms_norm(x, self.weight, axis, 1e-6)
+        return F.rms_norm(x, self.weight, axis, 1e-5)
 
 
 class TransformerBlock(Module):
@@ -190,7 +177,7 @@ class Embedding(Module):
         return F.matrix_multiply(x, self.weight)
 
 
-class QWen(Module):
+class Llama3(Module):
     embed_tokens: Embedding
     layers: ModuleList[TransformerBlock]
     freqs_cos: Tensor
@@ -204,7 +191,7 @@ class QWen(Module):
             self.layers.append(TransformerBlock(hidden_size, nr_querys, nr_groups, head_size, internal_size))
         self.embed_tokens = self.register_module("embed_tokens", Embedding(embedding_size, hidden_size))
         self.norm = self.register_module("norm", RMSNorm(hidden_size))
-        self.freqs_cos, self.freqs_sin = self.precompute_freqs(head_size, 1024, 1e6)
+        self.freqs_cos, self.freqs_sin = self.precompute_freqs(head_size, 1024, 5e5)
 
     def precompute_freqs(self, dim: int, size: int, theta: float) -> Tuple[Tensor, Tensor]:
         freqs = (1/theta) ** F.generate_sequence(0, dim//2, 2/dim, dtype="float32")
@@ -218,8 +205,8 @@ class QWen(Module):
     def forward(self, input_ids: Tensor, offset: Tensor, kv_caches: List[Tuple[Tensor, Tensor]]):
         _b, s = input_ids.shape[:2]
         states = self.embed_tokens.forward(input_ids)
-        freqs_cos = self.freqs_cos[offset:offset.item()+s.item()]
-        freqs_sin = self.freqs_sin[offset:offset.item()+s.item()]
+        freqs_cos = self.freqs_cos[offset:offset+s]
+        freqs_sin = self.freqs_sin[offset:offset+s]
         all_states = []
         for i, block in enumerate(self.layers):
             all_states.append(states)
@@ -235,15 +222,15 @@ class QWen(Module):
         for _i, block in enumerate(self.layers):
             kv_caches.append(block.create_kv_cache())
         return kv_caches
+    
 
-
-class QWenLM(Module):
-    model: QWen
+class Llama3LM(Module):
+    model: Llama3
     lm_head: Embedding
 
     def __init__(self, embedding_size: int, nr_layers: int, hidden_size: int, nr_querys: int, nr_groups: int, head_size: int, internal_size: int) -> None:
         super().__init__()
-        self.model = self.register_module("model", QWen(embedding_size, nr_layers, hidden_size, nr_querys, nr_groups, head_size, internal_size))
+        self.model = self.register_module("model", Llama3(embedding_size, nr_layers, hidden_size, nr_querys, nr_groups, head_size, internal_size))
         self.lm_head = self.register_module("lm_head", Embedding(embedding_size, hidden_size))
 
     def forward(self, input_ids: Tensor, offset: Tensor, kv_caches: List[Tuple[Tensor, Tensor]]):
@@ -255,47 +242,71 @@ class QWenLM(Module):
         return self.model.create_kv_caches()
     
 
-class QWenServer(Server[CacheInputSession]):
-    model: QWenLM
+class Llama3Server(Server[CacheInputSession]):
+    model: Llama3LM
+    model_forward = None
 
     def __init__(self, path: str) -> None:
         super().__init__()
-        self.model = QWenLM(
-            embedding_size=152064,
-            nr_layers=40,
-            hidden_size=5120,
-            nr_querys=40,
-            nr_groups=1,
+        self.model = Llama3LM(
+            embedding_size=128256,
+            nr_layers=32,
+            hidden_size=4096,
+            nr_querys=32,
+            nr_groups=4,
             head_size=128,
-            internal_size=13696,
+            internal_size=14336,
         )
         load_from_safetensors_index(self.model, path)
 
     def decode(self, session: CacheInputSession, input_ids: List[int]) -> Tensor:
         session.input_ids.extend(input_ids)
-        seqlen = len(session.input_ids)
         input = CUDATensor.from_numpy(torch.tensor([session.input_ids], dtype=torch.int32))
-        output_probs = self.model.forward(input, F.constant(0, "int32"), self.model.create_kv_caches())
-        return output_probs[0][seqlen-1]
+        def flatten_kv_caches(kv_cache_list):
+            kv_caches = []
+            for k, v in kv_cache_list:
+                kv_caches.append(k)
+                kv_caches.append(v)
+            return kv_caches
+
+        def unflatten_kv_caches(kv_caches):
+            kv_cache_list = []
+            for i in range(len(kv_caches)//2):
+                kv_cache_list.append((kv_caches[i*2], kv_caches[i*2+1]))
+            return kv_cache_list
+
+        if self.model_forward is None:
+            def model_forward(input, offset, *kv_caches):
+                kv_cache_list = unflatten_kv_caches(kv_caches)
+                output_probs = self.model.forward(input, offset, kv_cache_list)
+                kv_caches = flatten_kv_caches(kv_cache_list)
+                return (output_probs, *kv_caches)
+            model_forward = trace_function(model_forward, (input, F.constant(0, "int32"), *flatten_kv_caches(self.model.create_kv_caches())))
+            self.model_forward = TraceGraphExecutor(model_forward)
+            dump_graphviz(model_forward).save("graph.dot")
+            # (output_probs, *kv_caches) = model_forward(input, F.constant(0, "int32"), *flatten_kv_caches(self.model.create_kv_caches()))
+        (output_probs, *kv_caches) = self.model_forward.execute(input, F.constant(0, "int32"), *flatten_kv_caches(self.model.create_kv_caches()))
+        # output_probs = self.model.forward(input, F.constant(0, "int32"), self.model.create_kv_caches())
+        return output_probs[0][output_probs.shape[1]-1]
 
     def create_session(self) -> CacheInputSession:
         session = CacheInputSession()
         return session
+    
 
-
-class QWenCachedServer(Server[CacheKeyValueSession]):
-    model: QWenLM
+class Llama3CachedServer(Server[CacheKeyValueSession]):
+    model: Llama3LM
 
     def __init__(self, path: str) -> None:
         super().__init__()
-        self.model = QWenLM(
-            embedding_size=152064,
-            nr_layers=40,
-            hidden_size=5120,
-            nr_querys=40,
-            nr_groups=1,
+        self.model = Llama3LM(
+            embedding_size=128256,
+            nr_layers=32,
+            hidden_size=4096,
+            nr_querys=32,
+            nr_groups=4,
             head_size=128,
-            internal_size=13696,
+            internal_size=14336,
         )
         load_from_safetensors_index(self.model, path)
 
@@ -310,27 +321,27 @@ class QWenCachedServer(Server[CacheKeyValueSession]):
         return session
 
 
-class QWenTemplate(Template):
+class Llama3Template(Template):
     def generate_prompt(self, prompt: str) -> str:
-        return f"<|im_start|>system\n{prompt}"
+        return f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt}"
 
     def eos(self) -> str:
-        return "<|im_end|>"
+        return "<|eot_id|>"
 
     def first_chat(self, chat: str) -> str:
-        return f"<|im_end|>\n<|im_start|>user\n{chat}<|im_end|>\n<|im_start|>assistant\n"
+        return f"<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{chat}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
 
     def next_chat(self, chat: str) -> str:
-        return f"<|im_end|>\n<|im_start|>user\n{chat}<|im_end|>\n<|im_start|>assistant\n"
+        return f"<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{chat}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
 
 
 def main():
-    path = "/home/ubuntu/Git/Qwen1.5-14B-Chat/"
+    path = "/home/ubuntu/.cache/modelscope/hub/LLM-Research/Meta-Llama-3-8B-Instruct/"
     tokenizer_path = os.path.join(path, "tokenizer.json")
-    server = QWenServer(os.path.join(path, "model.safetensors.index.json"))
+    server = Llama3CachedServer(os.path.join(path, "model.safetensors.index.json"))
     tokenizer = HuggingFaceTokenizer(tokenizer_path)
     sampler = Top1Sampler()
-    template = QWenTemplate()
+    template = Llama3Template()
     agent = Agent(server, tokenizer, template, sampler)
     chat_cmdline(agent, "")
 

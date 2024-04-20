@@ -4,7 +4,8 @@ import math
 from typing import Tuple
 
 import numpy
-from minit.compiler.cxx import CXXUnit
+from minit.compiler.cxx import CXXUnit, import_symbol
+from minit.core.cache import cached
 from minit.cuda.tensor import CUDATensor
 import minit.functional as F
 from minit.functional.generate import fill, generate_sequence
@@ -15,7 +16,7 @@ from minit.functional.arith import constant
 from minit.functional.linalg import batch_matrix_multiply, matrix_multiply, triangle_upper
 from minit.module.checkpoint import load_from_safetensors
 from minit.module.list import ModuleList
-from minit.compiler.nvcc import nvcc
+from minit.cuda.compiler import nvcc
 from minit.cuda.kernel.utils import get_cuda_dtype
 from minit.compiler.template import substitude
 import minit.cuda.dispatch
@@ -49,7 +50,7 @@ def unpack(x: Tensor, axis: int) -> Tensor:
     return x
 
 
-@functools.lru_cache(maxsize=None)
+@cached()
 def generate_quantized_matrix_multiply(name: str, dtype: str, output_dtype: str):
     kernel_name = f"qmm_{name}"
     kernel_template =\
@@ -221,8 +222,23 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* x, unsigned* qweight, int
         "TILE_NK": "32",
         "KERNEL_NAME": kernel_name,
     })
-    kernel = nvcc.compile(CXXUnit(entrance=kernel_name, source=kernel_source))
-    return kernel
+    kernel = nvcc.compile(CXXUnit(source=kernel_source))
+    @import_symbol(kernel, kernel_name)
+    def entrance(
+        stream: ctypes.c_void_p,
+        x: ctypes.c_void_p,
+        qweight: ctypes.c_void_p,
+        g_idx: ctypes.c_void_p,
+        zeros: ctypes.c_void_p,
+        scales: ctypes.c_void_p,
+        outputs: ctypes.c_void_p,
+        m: ctypes.c_int,
+        n: ctypes.c_int,
+        k: ctypes.c_int,
+        nr_groups: ctypes.c_int,
+    ):
+        ...
+    return entrance
 
 
 @nvtx.annotate("quantized_matrix_multiply")
@@ -245,9 +261,9 @@ def quantized_matrix_multiply(x: CUDATensor, qweight: CUDATensor, zeros: CUDATen
     assert scales.dtype == x.dtype
     output = CUDATensor.allocate((*ms, n0), x.dtype)
     output._memory.reset()
-    kernel(None, ctypes.c_void_p(x.data_ptr), ctypes.c_void_p(qweight.data_ptr), ctypes.c_void_p(groups.data_ptr),
-           ctypes.c_void_p(zeros.data_ptr), ctypes.c_void_p(scales.data_ptr), ctypes.c_void_p(output.data_ptr), 
-           ctypes.c_int(m_item), ctypes.c_int(n.item()), ctypes.c_int(k.item()), ctypes.c_int(g.item()))
+    kernel(None, x.data_ptr, qweight.data_ptr, groups.data_ptr,
+           zeros.data_ptr, scales.data_ptr, output.data_ptr, 
+           m_item, n.item(), k.item(), g.item())
     return output
 
 
@@ -331,16 +347,16 @@ class Attention(Module):
             n=self.nr_querys,
             d=self.head_size,
         ))
-        k = k.rearrange("bs(nd)->bsnd", dict(
+        k = k.rearrange("bs(nd)->bs(nr)d", dict(
             n=nr_key_values // 2,
             d=self.head_size,
+            r=self.nr_groups,
         ))
-        v = v.rearrange("bs(nd)->bsnd", dict(
+        v = v.rearrange("bs(nd)->bs(nr)d", dict(
             n=nr_key_values // 2,
             d=self.head_size,
+            r=self.nr_groups,
         ))
-        k = k.repeat_interleaved(2, self.nr_groups)
-        v = v.repeat_interleaved(2, self.nr_groups)
         q = rope(q, precomp_freqs_cos, precomp_freqs_sin)
         k = rope(k, precomp_freqs_cos, precomp_freqs_sin)
         qk = F.einsum("bsnd,btnd->bnst", q, k)

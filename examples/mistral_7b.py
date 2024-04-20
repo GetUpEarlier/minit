@@ -1,7 +1,9 @@
 import math
-from typing import Tuple
+import os
+from typing import List, Tuple
 
 import numpy
+import torch
 from minit.cuda.tensor import CUDATensor
 import minit.functional as F
 from minit.module import Module
@@ -10,6 +12,9 @@ from minit.module.checkpoint import load_from_torch
 from minit.module.list import ModuleList
 import minit.cuda.dispatch
 import nvtx
+import sentencepiece
+
+from agent import Server, Sampler, Tokenizer, Template, Agent, chat_cmdline
 
 default_dtype = "float16"
 
@@ -52,7 +57,7 @@ class Attention(Module):
         self.wo = self.register_module("wo", Linear(nr_querys * head_size, hidden_size))
 
     @nvtx.annotate("attention")
-    def forward(self, x: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor):
+    def forward(self, x: Tensor, offset: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor, k_cache: Tensor, v_cache: Tensor):
         nr_key_values = (self.nr_querys // self.nr_groups) * 2
         assert len(x.shape) == 3
         q = self.wq.forward(x).rearrange("bs(hd)->bshd", {
@@ -69,15 +74,28 @@ class Attention(Module):
             "d": self.head_size,
             "r": self.nr_groups,
         })
+        seqlen = q.shape[1]
         q = F.rope(q, precomp_freqs_cos, precomp_freqs_sin)
         k = F.rope(k, precomp_freqs_cos, precomp_freqs_sin)
+        k = F.tie([k_cache, k], axis=1)
+        v = F.tie([v_cache, v], axis=1)
+        k_cache = k
+        v_cache = v
         qk = F.einsum("bsnd,btnd->bnst", q, k)
         qk = qk / math.sqrt(self.head_size) # b, nr_heads, s, s
-        qk = qk + F.triangle_upper(F.fill(-math.inf, qk.shape, qk.dtype), diagonal=1)
+        mask = F.triangle_upper(F.fill(-math.inf, (seqlen, seqlen), qk.dtype), diagonal=1)
+        mask = F.tie([
+            F.fill(0, (seqlen, offset), dtype=default_dtype),
+            mask,
+        ], axis=1)
+        qk = qk + mask.rearrange("st->bnst", {
+            "b": qk.shape[0],
+            "n": qk.shape[1],
+        })
         qk_softmax = F.softmax(qk, 3)
         output = F.einsum("bnst,btnd->bs(nd)", qk_softmax, v)
         output = self.wo.forward(output)
-        return output
+        return output, k_cache, v_cache
 
 
 class FeedForward(Module):
@@ -120,10 +138,17 @@ class TransformerBlock(Module):
         self.ffn_norm = self.register_module("ffn_norm", RMSNorm(hidden_size))
 
     @nvtx.annotate("layer")
-    def forward(self, x: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor):
-        attention_output = x + self.attention.forward(self.attention_norm.forward(x), precomp_freqs_cos, precomp_freqs_sin)
+    def forward(self, x: Tensor, offset: Tensor, precomp_freqs_cos: Tensor, precomp_freqs_sin: Tensor, k_cache: Tensor, v_cache: Tensor):
+        attention_output, k_cache, v_cache = self.attention.forward(self.attention_norm.forward(x), offset, precomp_freqs_cos, precomp_freqs_sin, k_cache, v_cache)
+        attention_output = x + attention_output
         ffn_output = self.feed_forward.forward(self.ffn_norm.forward(attention_output))
-        return attention_output + ffn_output
+        return (attention_output + ffn_output), k_cache, v_cache
+
+    def create_kv_cache(self) -> Tuple[Tensor, Tensor]:
+        return (
+            CUDATensor.allocate((1, 0, self.attention.nr_querys, self.attention.head_size), dtype=default_dtype),
+            CUDATensor.allocate((1, 0, self.attention.nr_querys, self.attention.head_size), dtype=default_dtype)
+        )
 
 
 class Embedding(Module):
@@ -143,6 +168,7 @@ class Embedding(Module):
     @nvtx.annotate("embedding.backward")
     def backward(self, x: Tensor) -> Tensor:
         return F.matrix_multiply(x, self.weight)
+
 
 class LlaMa2(Module):
     tok_embeddings: Embedding
@@ -171,65 +197,147 @@ class LlaMa2(Module):
         return freqs_cos, freqs_sin
 
     @nvtx.annotate("llama")
-    def forward(self, input_ids: Tensor):
+    def forward(self, input_ids: Tensor, offset: Tensor, kv_caches: List[Tuple[Tensor, Tensor]]):
         _b, s = input_ids.shape[:2]
         states = self.tok_embeddings.forward(input_ids)
-        freqs_cos = self.freqs_cos[:s]
-        freqs_sin = self.freqs_sin[:s]
+        freqs_cos = self.freqs_cos[offset:offset.item()+s.item()]
+        freqs_sin = self.freqs_sin[offset:offset.item()+s.item()]
         all_states = []
-        for _i, block in enumerate(self.layers):
+        for i, block in enumerate(self.layers):
             all_states.append(states)
             block: TransformerBlock
-            states = block.forward(states, freqs_cos, freqs_sin)
+            k_cache, v_cache = kv_caches[i]
+            states, k_cache, v_cache = block.forward(states, offset, freqs_cos, freqs_sin, k_cache, v_cache)
+            kv_caches[i] = k_cache, v_cache
         states = self.norm.forward(states)
         output_probs = self.output.backward(states)
         return output_probs
+    
+    def create_kv_caches(self) -> List[Tuple[Tensor, Tensor]]:
+        kv_caches = []
+        for _i, block in enumerate(self.layers):
+            kv_caches.append(block.create_kv_cache())
+        return kv_caches
+    
+
+class Llama2Session:
+    input_ids: List[int]
+
+    def __init__(self) -> None:
+        self.input_ids = []
+    
+
+class Llama2Server(Server[Llama2Session]):
+    model: LlaMa2
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.model = LlaMa2(
+            embedding_size=32000,
+            nr_layers=32,
+            hidden_size=4096,
+            nr_querys=32,
+            nr_groups=4,
+            head_size=128,
+            internal_size=14336,
+        )
+        load_from_torch(self.model, path)
+
+    def decode(self, session: Llama2Session, input_ids: List[int]) -> Tensor:
+        session.input_ids.extend(input_ids)
+        input = CUDATensor.from_numpy(torch.tensor([session.input_ids], dtype=torch.int32))
+        output_probs = self.model.forward(input, F.constant(0, "int32"), self.model.create_kv_caches())
+        return output_probs[0][output_probs.shape[1]-1]
+
+    def create_session(self) -> Llama2Session:
+        session = Llama2Session()
+        return session
+
+
+class Llama2CachedSession:
+    kv_caches: List[Tuple[Tensor, Tensor]]
+    offset: int
+
+    def __init__(self, kv_caches: List[Tuple[Tensor, Tensor]]) -> None:
+        self.kv_caches = kv_caches
+        self.offset = 0
+    
+
+class Llama2CachedServer(Server[Llama2CachedSession]):
+    model: LlaMa2
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.model = LlaMa2(
+            embedding_size=32000,
+            nr_layers=32,
+            hidden_size=4096,
+            nr_querys=32,
+            nr_groups=4,
+            head_size=128,
+            internal_size=14336,
+        )
+        load_from_torch(self.model, path)
+
+    def decode(self, session: Llama2CachedSession, input_ids: List[int]) -> Tensor:
+        input = CUDATensor.from_numpy(torch.tensor([input_ids], dtype=torch.int32))
+        output_probs = self.model.forward(input, F.constant(session.offset, "int32"), session.kv_caches)
+        session.offset += len(input_ids)
+        return output_probs[0][output_probs.shape[1]-1]
+
+    def create_session(self) -> Llama2CachedSession:
+        session = Llama2CachedSession(self.model.create_kv_caches())
+        return session
+
+
+class Llama2Tokenizer(Tokenizer):
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.sentencepiece = sentencepiece.SentencePieceProcessor(path)
+
+    def tokenize(self, text: str) -> List[int]:
+        [input_ids,] = self.sentencepiece.tokenize([
+            text
+        ])
+        return input_ids
+
+    def detokenize(self, ids: List[int]) -> str:
+        text = ""
+        for id in ids:
+            text += self.sentencepiece.id_to_piece(id)
+        return text
+    
+
+class Llama2Template(Template):
+    def generate_prompt(self, prompt: str) -> str:
+        return f"<s>[INST] {prompt}"
+
+    def eos(self) -> str:
+        return "</s>"
+
+    def first_chat(self, chat: str) -> str:
+        return f"{chat} [/INST]"
+
+    def next_chat(self, chat: str) -> str:
+        return f"</s><s>[INST] {chat} [/INST]"
+
+
+class Llama2Sampler(Sampler):
+    def sample(self, probs: Tensor) -> int:
+        output_id = probs.numpy().argmax(axis=-1).item()
+        return output_id
 
 
 def main():
-    import os
-    import torch
     path = "/home/ubuntu/Git/minit/Downloads/Mistral-7B-v0.2-Instruct/"
     weights_path = os.path.join(path, "consolidated.00.pth")
     tokenizer_path = os.path.join(path, "tokenizer.model")
-    import sentencepiece
-    model = LlaMa2(
-        embedding_size=32000,
-        nr_layers=32,
-        hidden_size=4096,
-        nr_querys=32,
-        nr_groups=4,
-        head_size=128,
-        internal_size=14336,
-    )
-    load_from_torch(model, weights_path)
-    tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
-    print(f"eos: {tokenizer.id_to_piece(tokenizer.eos_id())}")
-    prompt = ""
-    while True:
-        print("User:", end="\t", flush=True)
-        line = input()
-        prompt += f"<s>[INST] {line} [/INST]"
-        [input_ids,] = tokenizer.tokenize([
-            prompt
-        ])
-        result = ""
-        print("Assistant:", end="\t", flush=True)
-        while True:
-            output_probs: numpy.ndarray = model.forward(CUDATensor.from_numpy(torch.tensor([input_ids], dtype=torch.int32))).numpy()
-            output_id = output_probs.argmax(axis=-1)[0][-1].item()
-            output_piece = tokenizer.id_to_piece(output_id)
-            output_prob = output_probs[0][-1][output_id]
-            # print(output_prob)
-            result += output_piece
-            if output_piece == "<unk>":
-                raise
-            if output_piece == "</s>":
-                break
-            print(output_piece, end="", flush=True)
-            input_ids += [output_id]
-        prompt += (result + "<s>")
-        print()
+    server = Llama2CachedServer(weights_path)
+    tokenizer = Llama2Tokenizer(tokenizer_path)
+    sampler = Llama2Sampler()
+    template = Llama2Template()
+    agent = Agent(server, tokenizer, template, sampler)
+    chat_cmdline(agent, "")
 
 
 if __name__ == '__main__':
