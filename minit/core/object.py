@@ -49,19 +49,23 @@ def get_origin_or_self(ty: Type):
     return get_origin(ty) or ty
 
 
+def is_union(ty: Type):
+    return get_origin_or_self(ty) == Union
+
+
 # mro without dedup
 def generic_mro(ty: Type):
-    if not hasattr(ty, "__origin__ "):
+    if not hasattr(ty, "__origin__"):
         return inspect.getmro(ty)
-    orig_bases = ty.__orig_bases__
+    orig_bases = ty.__origin__.__orig_bases__
     generic = None
     for orig_base in orig_bases:
         if get_origin_or_self(orig_base) == Generic:
             generic = orig_base
-    assert generic is not None
+    assert generic is not None, f"generic not found for {ty}"
     assert len(get_args(ty)) == len(get_args(generic))
     args_mapping = { generic_arg: arg for arg, generic_arg in zip(get_args(ty), get_args(generic), strict=True) }
-    if len(orig_base) == 1:
+    if len(orig_bases) == 1:
         return ty
     def substitude(ty: Type):
         if not hasattr(ty, "__origin__"):
@@ -83,12 +87,19 @@ def match_pattern(pattern: Type, arg: Type):
         if is_literal(arg) and pattern == arg:
             return pattern
         return None
+    # object
+    if is_union(pattern):
+        for pattern_arg in get_args(pattern):
+            result = match_pattern(pattern_arg, arg)
+            if result is not None:
+                return result
+        return None
+    # arg literal
     origin_pattern = get_origin_or_self(pattern)
     if is_literal(arg):
         if isinstance(get_args(arg)[0], origin_pattern):
             return pattern
         return None
-    # object
     origin_arg = get_origin_or_self(arg)
     if not issubclass(origin_arg, origin_pattern):
         return None
