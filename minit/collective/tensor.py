@@ -29,10 +29,11 @@ class CollectiveTensor(Tensor):
         self._local = local
         self._spec = spec
         self._shape = shape
+        assert not isinstance(self._local, CollectiveTensor)
 
     @property
     def shape(self):
-        return self._shape
+        return tuple([CollectiveTensor.from_broadcast(self._communicator, dim) for dim in self._shape])
 
     @property
     def dtype(self):
@@ -43,21 +44,21 @@ class CollectiveTensor(Tensor):
         return self._spec
 
     @staticmethod
-    def from_broadcast(communicator: DistributedCommunicator, local: Tensor):
+    def from_broadcast(communicator: DistributedCommunicator, local: Tensor) -> "CollectiveTensor":
         return CollectiveTensor(communicator, local, CollectiveSpecBroadcast(), local.shape)
 
     @staticmethod
-    def from_split(communicator: DistributedCommunicator, local: Tensor, axis: int):
+    def from_split(communicator: DistributedCommunicator, local: Tensor, axis: int) -> "CollectiveTensor":
         shape = local.shape
-        shape = shape[:axis] + shape[axis] * get_world().size + shape[axis+1:]
+        shape = shape[:axis] + ((shape[axis] * get_world().size),) + shape[axis+1:]
         return CollectiveTensor(communicator, local, CollectiveSpecSplit(axis), shape)
 
     @staticmethod
-    def from_unique(communicator: DistributedCommunicator, local: Tensor, rank: int):
+    def from_unique(communicator: DistributedCommunicator, local: Tensor, rank: int) -> "CollectiveTensor":
         return CollectiveTensor(communicator, local, CollectiveSpecUnique(rank), local.shape)
 
     @staticmethod
-    def from_partial(communicator: DistributedCommunicator, local: Tensor):
+    def from_partial(communicator: DistributedCommunicator, local: Tensor) -> "CollectiveTensor":
         return CollectiveTensor(communicator, local, CollectiveSpecPartial(), local.shape)
 
     def to_broadcast(self) -> "CollectiveTensor":
@@ -86,7 +87,7 @@ class CollectiveTensor(Tensor):
             return self
         self = self.to_broadcast()
         rank = get_world().rank
-        size = self.shape[axis] / get_world().size
+        size = self._shape[axis] / get_world().size
         return CollectiveTensor.from_split(self._communicator, self._local.slice(size*rank, size*(rank+1), axis), axis)
 
     def to_unique(self, rank: int):
@@ -94,3 +95,10 @@ class CollectiveTensor(Tensor):
             return self
         self = self.to_broadcast()
         return CollectiveTensor.from_unique(self._communicator, self._local if get_world().rank == rank else MetaTensor(self._local.shape, self._local.dtype), rank)
+
+    def type(self):
+        return CollectiveTensor
+
+    def item(self):
+        assert self.spec == CollectiveSpecBroadcast()
+        return self._local.item()

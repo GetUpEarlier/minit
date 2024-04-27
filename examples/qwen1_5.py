@@ -1,9 +1,17 @@
+import base64
 import math
 import os
 from typing import List, Tuple
 
 import numpy
 import torch
+
+from minit.distributed.communicator import DistributedCommunicator
+
+from minit.nccl.tensor import NCCLTensor
+
+from minit.distributed.group import get_world, initialize_world
+from minit.collective.tensor import CollectiveTensor
 from minit.cuda.tensor import CUDATensor
 import minit.functional as F
 from minit.module import Module
@@ -18,6 +26,8 @@ from minit.chat.sample import Top1Sampler
 from minit.chat.template import Template
 from minit.chat.tokenizer import HuggingFaceTokenizer
 from minit.chat.agent import Agent, chat_cmdline
+import minit.collective.dispatch
+import minit.nccl.dispatch
 
 default_dtype = "float16"
 
@@ -218,8 +228,8 @@ class QWen(Module):
     def forward(self, input_ids: Tensor, offset: Tensor, kv_caches: List[Tuple[Tensor, Tensor]]):
         _b, s = input_ids.shape[:2]
         states = self.embed_tokens.forward(input_ids)
-        freqs_cos = self.freqs_cos[offset:offset.item()+s.item()]
-        freqs_sin = self.freqs_sin[offset:offset.item()+s.item()]
+        freqs_cos = self.freqs_cos[offset:offset+s]
+        freqs_sin = self.freqs_sin[offset:offset+s]
         all_states = []
         for i, block in enumerate(self.layers):
             all_states.append(states)
@@ -281,6 +291,52 @@ class QWenServer(Server[CacheInputSession]):
     def create_session(self) -> CacheInputSession:
         session = CacheInputSession()
         return session
+    
+
+class QWenCollectiveServer(Server[CacheInputSession]):
+    communicator: DistributedCommunicator
+    model: QWenLM
+
+    def __init__(self, path: str, communicator: DistributedCommunicator) -> None:
+        super().__init__()
+        self.model = QWenLM(
+            embedding_size=152064,
+            nr_layers=40,
+            hidden_size=5120,
+            nr_querys=40,
+            nr_groups=1,
+            head_size=128,
+            internal_size=13696,
+        )
+        def epilogue(key: str, value: Tensor):
+            value = CollectiveTensor.from_broadcast(communicator, value)
+            if "q_proj.weight" in key or "k_proj.weight" in key or "v_proj.weight" in key:
+                value = value.to_split(0)
+            elif "o_proj.weight" in key:
+                value = value.to_split(1)
+            elif "up_proj.weight" in key or "gate_proj.weight" in key:
+                value = value.to_split(0)
+            elif "down_proj.weight" in key:
+                value = value.to_split(1)
+            return value
+        load_from_safetensors_index(self.model, path, epilogue)
+        self.communicator = communicator
+        self.model.model.freqs_cos = CollectiveTensor.from_broadcast(self.communicator, self.model.model.freqs_cos)
+        self.model.model.freqs_sin = CollectiveTensor.from_broadcast(self.communicator, self.model.model.freqs_sin)
+
+    def decode(self, session: CacheInputSession, input_ids: List[int]) -> Tensor:
+        session.input_ids.extend(input_ids)
+        seqlen = len(session.input_ids)
+        input = CUDATensor.from_numpy(torch.tensor([session.input_ids], dtype=torch.int32))
+        input = CollectiveTensor.from_broadcast(self.communicator, input)
+        offset = CollectiveTensor.from_broadcast(self.communicator, F.constant(0, "int32"))
+        kv_caches = [(CollectiveTensor.from_broadcast(self.communicator, k), CollectiveTensor.from_broadcast(self.communicator, v)) for k, v in self.model.create_kv_caches()]
+        output_probs = self.model.forward(input, offset, kv_caches)
+        return output_probs[0][seqlen-1]
+
+    def create_session(self) -> CacheInputSession:
+        session = CacheInputSession()
+        return session
 
 
 class QWenCachedServer(Server[CacheKeyValueSession]):
@@ -325,14 +381,33 @@ class QWenTemplate(Template):
 
 
 def main():
-    path = "/home/ubuntu/Git/Qwen1.5-14B-Chat/"
+    rank, world_size = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
+    initialize_world(rank, world_size)
+    # base64_unique_id = os.environ["NCCL_UNIQUE_ID"]
+    with open(".sync", "rb") as f:
+        unique_id = f.read()
+#     base64_unique_id =\
+# b"8wSG6+D5CzwCAOqDrBEABgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPCIYQysVQAAAAAAAAAAAABgtNycYH8AAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAEH8cnWB/AAAofTOdYH8AAOCKR5xgfwAAKH0znWB/AAA="
+    # unique_id = base64.b64decode(base64_unique_id)
+    version = NCCLTensor.connect(unique_id, get_world().rank, get_world().size)
+    communicator = DistributedCommunicator(version)
+
+    path = "/root/autodl-tmp/modelscope/hub/qwen/Qwen1___5-14B-Chat"
     tokenizer_path = os.path.join(path, "tokenizer.json")
-    server = QWenServer(os.path.join(path, "model.safetensors.index.json"))
+    server = QWenCollectiveServer(os.path.join(path, "model.safetensors.index.json"), communicator)
     tokenizer = HuggingFaceTokenizer(tokenizer_path)
     sampler = Top1Sampler()
     template = QWenTemplate()
     agent = Agent(server, tokenizer, template, sampler)
-    chat_cmdline(agent, "")
+    chat = agent.chat("")
+    assert chat.send(None) is None
+    while True:
+        request = "Hello!"
+        response = chat.send(request)
+        while response is not None:
+            print(response, end="", flush=True)
+            response = chat.send(None)
+        print()
 
 
 if __name__ == '__main__':

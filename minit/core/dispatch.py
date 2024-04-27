@@ -20,12 +20,12 @@ def lookup_implementation_from_types(tys: Tuple[Type, ...]):
                 matching.append((match_result, signature, func, predicate, priority))
                 if max_priority is None or priority > max_priority:
                     max_priority = priority
-    assert len(matching) > 0, "no matching function"
+    assert len(matching) > 0, f"no matching function for {tys}"
     selected = []
     for match_result, signature, func, predicate, priority in matching:
         if priority == max_priority:
             selected.append((match_result, signature, func, predicate, priority))
-    assert len(selected) == 1, f"more than one {len(matching)} function matches"
+    assert len(selected) == 1, f"more than one function matches for {tys}"
     _, _, cache, _, _ = selected[0]
     return cache
 

@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Tuple, Union
 import nvtx
 
 from .linalg import batch_matrix_multiply, matrix_multiply
-from .utils import _convert_scalar
 from ..graph import SubGraph
 from ..core.tensor import Tensor
 

@@ -3,7 +3,7 @@ import functools
 from ..core.tensor import Tensor
 from ..core.dispatch import dispatch
 from ..operator.linalg import MatrixMultiply, BatchMatrixMultiply, TriangleLower, TriangleUpper
-from .utils import _convert_scalar
+from .utils import _convert_constant
 
 
 def matrix_multiply(x: Tensor, y: Tensor):
@@ -16,7 +16,7 @@ def matrix_multiply(x: Tensor, y: Tensor):
         ms = None
     (z,) = dispatch(MatrixMultiply(), x, y)
     if ms is not None:
-        z = expand(z, 0, _convert_scalar(*ms))
+        z = expand(z, 0, _convert_constant(*ms))
     return z
 
 
@@ -29,17 +29,17 @@ def batch_matrix_multiply(x: Tensor, y: Tensor):
     x = fold(x, 0, len(bs))
     y = fold(y, 0, len(bs))
     (z,) = dispatch(BatchMatrixMultiply(), x, y)
-    z = expand(z, 0, _convert_scalar(*bs))
+    z = expand(z, 0, _convert_constant(*bs))
     return z
 
 
 def triangle_upper(x: Tensor, diagonal: Tensor):
-    (diagonal,) = _convert_scalar(diagonal)
+    (diagonal,) = _convert_constant(diagonal)
     (z,) = dispatch(TriangleUpper(), x, diagonal)
     return z
 
 
 def triangle_lower(x: Tensor, diagonal: Tensor):
-    (diagonal,) = _convert_scalar(diagonal)
+    (diagonal,) = _convert_constant(diagonal)
     (z,) = dispatch(TriangleLower(), x, diagonal)
     return z

@@ -33,7 +33,7 @@ class CUDATensor(Tensor):
 
     @property
     def shape(self) -> Tuple[Tensor, ...]:
-        return tuple([ScalarTensor(dim, "int32") for dim in self._shape])
+        return tuple([ScalarTensor(dim, (), "int32") for dim in self._shape])
 
     @property
     def dtype(self) -> str:

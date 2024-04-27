@@ -14,4 +14,4 @@ def to_immediate_shape(shape: Shape) -> ImmediateShape:
 
 
 def to_symbolic_shape(shape: Shape) -> SymbolicShape:
-    return tuple([dim if isinstance(dim, Tensor) else ScalarTensor(dim, "int32") for dim in shape])
+    return tuple([dim if isinstance(dim, Tensor) else ScalarTensor(dim, (), "int32") for dim in shape])

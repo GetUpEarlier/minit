@@ -5,6 +5,8 @@ def main():
     id = launch_server()
     print(f"server launched at: {id}")
     base64_id = base64.b64encode(id)
+    with open(".sync", "wb") as f:
+        f.write(id)
     print(f"base64: {base64_id}")
     print("Press enter to exit")
     input()

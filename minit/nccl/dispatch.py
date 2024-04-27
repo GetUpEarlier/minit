@@ -8,14 +8,18 @@ from .kernel import _generate_nccl_primitives
 
 @register_dispatch()
 def dispatch_all_gather(op: DistributedAllGather, version: NCCLTensor, x: CUDATensor):
+    if op.axis != 0:
+        x = x.transpose(0, op.axis)
     shape = x._shape
     size = 1
     for dim in shape:
         size *= dim
-    shape = shape[:op.axis] + shape[op.axis] * get_world().size + shape[op.axis+1:]
+    shape = ((shape[0] * get_world().size),) + shape[1:]
     z = CUDATensor.allocate(shape, x._dtype)
-    all_gather, _, _ = _generate_nccl_primitives()
+    all_gather, _, _ = _generate_nccl_primitives(x._dtype)
     all_gather(None, version.comm, x.data_ptr, z.data_ptr, size)
+    if op.axis != 0:
+        z = z.transpose(0, op.axis)
     return (version, z,)
 
 @register_dispatch()
@@ -36,6 +40,6 @@ def dispatch_broadcast(op: DistributedBroadcast, version: NCCLTensor, x: CUDATen
     for dim in shape:
         size *= dim
     z = CUDATensor.allocate(shape, x._dtype)
-    _, _, broadcast = _generate_nccl_primitives()
+    _, _, broadcast = _generate_nccl_primitives(x._dtype)
     broadcast(None, version.comm, x.data_ptr, z.data_ptr, size, op.source)
     return (version, z,)

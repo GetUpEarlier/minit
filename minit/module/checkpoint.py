@@ -1,6 +1,8 @@
 import os
-from typing import Dict, List
+from typing import Callable, Dict, List
 import json
+
+from ..core.tensor import Tensor
 
 from ..core.shape import to_immediate_shape
 from ..cuda.tensor import CUDATensor
@@ -19,7 +21,7 @@ def load_from_torch(model: Module, path: str):
     return model
 
 
-def load_from_safetensors(model: Module, paths: List[str]):
+def load_from_safetensors(model: Module, paths: List[str], epilogue: Callable[[str, Tensor], Tensor] = lambda x: x):
     import torch
     import safetensors
     for path in paths:
@@ -32,12 +34,12 @@ def load_from_safetensors(model: Module, paths: List[str]):
                 shape = to_immediate_shape(model.get_buffer(key).shape)
                 array = array.to(getattr(torch, dtype))
                 assert array.shape == shape
-                model.update_buffer(key, CUDATensor.from_numpy(array))
+                model.update_buffer(key, epilogue(key, CUDATensor.from_numpy(array)))
     return model
 
 
-def load_from_safetensors_index(model: Module, path: str):
+def load_from_safetensors_index(model: Module, path: str, epilogue: Callable[[str, Tensor], Tensor] = lambda k, v: v):
     with open(path) as f:
         index = json.load(f)
     parts = list(map(lambda part: os.path.join(os.path.dirname(path), part), dict.fromkeys(index["weight_map"].values())))
-    load_from_safetensors(model, parts)
+    load_from_safetensors(model, parts, epilogue)
