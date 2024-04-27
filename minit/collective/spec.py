@@ -1,27 +1,41 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import Union
+from typing import Generic, Literal, TypeVar, Union
+
+from ..core.object import Object
+
+
+_Axis = TypeVar("_Axis")
+_Rank = TypeVar("_Rank")
 
 
 @dataclass(frozen=True)
-class CollectiveSpecSplit:
+class CollectiveSpecSplit(Object, Generic[_Axis]):
     axis: int
 
-@dataclass(frozen=True)
-class CollectiveSpecPartial:
-    ...
+    def type(self):
+        return CollectiveSpecSplit[Literal[self.axis]]
 
 @dataclass(frozen=True)
-class CollectiveSpecBroadcast:
-    ...
+class CollectiveSpecPartial(Object):
+    def type(self):
+        return CollectiveSpecPartial
 
 @dataclass(frozen=True)
-class CollectiveSpecUnique:
+class CollectiveSpecBroadcast(Object):
+    def type(self):
+        return CollectiveSpecBroadcast
+
+@dataclass(frozen=True)
+class CollectiveSpecUnique(Object, Generic[_Rank]):
     rank: int
 
+    def type(self):
+        return CollectiveSpecUnique[Literal[self.rank]]
+
 CollectiveSpec = Union[
-    CollectiveSpecSplit,
+    CollectiveSpecSplit[int],
     CollectiveSpecPartial,
     CollectiveSpecBroadcast,
-    CollectiveSpecUnique
+    CollectiveSpecUnique[int],
 ]

@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Generic, Optional, Tuple, TypeVar
 
 import numpy
 
@@ -10,7 +10,10 @@ from ..core.tensor import Tensor
 from .spec import CollectiveSpecBroadcast, CollectiveSpec, CollectiveSpecSplit, CollectiveSpecUnique, CollectiveSpecPartial
 
 
-class CollectiveTensor(Tensor):
+_Spec = TypeVar("_Spec", bound=CollectiveSpec)
+
+
+class CollectiveTensor(Tensor, Generic[_Spec]):
     __slots__ = [
         "_communicator",
         "_shape",
@@ -21,9 +24,9 @@ class CollectiveTensor(Tensor):
     _communicator: DistributedCommunicator
     _shape: Tuple[Tensor, ...]
     _local: Optional[Tensor]
-    _spec: CollectiveSpec
+    _spec: _Spec
 
-    def __init__(self, communicator: DistributedCommunicator, local: Optional[Tensor], spec: CollectiveSpec, shape: Tuple[Tensor, ...]) -> None:
+    def __init__(self, communicator: DistributedCommunicator, local: Optional[Tensor], spec: _Spec, shape: Tuple[Tensor, ...]) -> None:
         super().__init__()
         self._communicator = communicator
         self._local = local
@@ -97,7 +100,7 @@ class CollectiveTensor(Tensor):
         return CollectiveTensor.from_unique(self._communicator, self._local if get_world().rank == rank else MetaTensor(self._local.shape, self._local.dtype), rank)
 
     def type(self):
-        return CollectiveTensor
+        return CollectiveTensor[self._spec.type()]
 
     def item(self):
         assert self.spec == CollectiveSpecBroadcast()

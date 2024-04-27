@@ -4,7 +4,6 @@ from typing import Any, Union
 
 from ..core.tensor import Tensor
 from ..core.scalar import ScalarTensor
-from ..core.constant import ConstantTensor
 from ..core.dispatch import register_dispatch
 from ..core.operator import Operator
 
@@ -53,7 +52,7 @@ class Cast(Operator):
 @register_dispatch()
 def register_constant(op: Constant, *sizes: Tensor):
     assert not isinstance(op.value, Tensor)
-    c = ConstantTensor(op.value, tuple(sizes), op.dtype)
+    c = ScalarTensor(op.value, tuple(sizes), op.dtype)
     return (c,)
 
 def register_elemwise_operator(op_type, op_py):
@@ -64,22 +63,12 @@ def register_elemwise_operator(op_type, op_py):
         return False
 
     @register_dispatch(predicate=any_scalar)
-    def _register_elemwise_scalar(op: op_type, *args: Union[ScalarTensor, ConstantTensor]): # type: ignore
+    def _register_elemwise_scalar(op: op_type, *args: ScalarTensor): # type: ignore
         for arg in args:
             assert arg.dtype == args[0].dtype
         items = [arg.item() for arg in args]
         c_item = op_py(*items)
         c = ScalarTensor(c_item, args[0].shape, args[0].dtype)
-        return (c,)
-
-    @register_dispatch()
-    def _register_elemwise_scalar(op: op_type, *args: ConstantTensor): # type: ignore
-        from ..functional.arith import constant
-        for arg in args:
-            assert arg.dtype == args[0].dtype
-        items = [arg.item() for arg in args]
-        c_item = op_py(*items)
-        c = constant(c_item, args[0].shape, args[0].dtype)
         return (c,)
 
 

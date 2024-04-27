@@ -1,10 +1,7 @@
 from typing import Tuple
 
 from ..operator.arith import Constant
-
 from ..core.dispatch import dispatch
-
-# from ..core.constant import ConstantTensor
 from ..core.tensor import Tensor
 
 

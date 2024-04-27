@@ -5,6 +5,7 @@ from typing import List, Tuple
 import numpy
 import torch
 from minit.collective.tensor import CollectiveTensor
+from minit.core.torch import TorchTensor
 from minit.cuda.tensor import CUDATensor
 from minit.distributed.communicator import DistributedCommunicator
 from minit.nccl.tensor import NCCLTensor
@@ -101,7 +102,6 @@ class Attention(Module):
             F.fill(0, (seqlen, offset), dtype=default_dtype),
             mask,
         ], axis=1)
-        # mask = CollectiveTensor.from_broadcast(qk._communicator, mask)
         qk = qk + mask.rearrange("st->bnst", {
             "b": qk.shape[0],
             "n": qk.shape[1],
@@ -286,14 +286,15 @@ class Llama3CollectiveServer(Server[CacheInputSession]):
         super().__init__()
         self.model = Llama3LM(
             embedding_size=128256,
-            nr_layers=32,
-            hidden_size=4096,
-            nr_querys=32,
-            nr_groups=4,
+            nr_layers=80,
+            hidden_size=8192,
+            nr_querys=64,
+            nr_groups=8,
             head_size=128,
-            internal_size=14336,
+            internal_size=28672,
         )
-        def epilogue(key: str, value: Tensor):
+        def epilogue(key: str, value: TorchTensor):
+            value = CUDATensor.from_numpy(value.value)
             value = CollectiveTensor.from_broadcast(communicator, value)
             if "q_proj.weight" in key or "k_proj.weight" in key or "v_proj.weight" in key:
                 value = value.to_split(0)
@@ -306,15 +307,12 @@ class Llama3CollectiveServer(Server[CacheInputSession]):
             return value
         load_from_safetensors_index(self.model, path, epilogue)
         self.communicator = communicator
-        self.model.model.freqs_cos = CollectiveTensor.from_broadcast(self.communicator, self.model.model.freqs_cos)
-        self.model.model.freqs_sin = CollectiveTensor.from_broadcast(self.communicator, self.model.model.freqs_sin)
 
     def decode(self, session: CacheInputSession, input_ids: List[int]) -> Tensor:
         session.input_ids.extend(input_ids)
         input = CUDATensor.from_numpy(torch.tensor([session.input_ids], dtype=torch.int32))
-        input = CollectiveTensor.from_broadcast(self.communicator, input)
-        offset = CollectiveTensor.from_broadcast(self.communicator, F.constant(0, "int32"))
-        kv_caches = [(CollectiveTensor.from_broadcast(self.communicator, k), CollectiveTensor.from_broadcast(self.communicator, v)) for k, v in self.model.create_kv_caches()]
+        offset = F.constant(0, "int32")
+        kv_caches = self.model.create_kv_caches()
         output_probs = self.model.forward(input, offset, kv_caches)
         return output_probs[0][output_probs.shape[1]-1]
 
@@ -424,7 +422,7 @@ def main():
     version = NCCLTensor.connect(unique_id, get_world().rank, get_world().size)
     communicator = DistributedCommunicator(version)
 
-    path = "/root/autodl-tmp/modelscope/LLM-Research/Meta-Llama-3-8B-Instruct/"
+    path = "/root/autodl-tmp/modelscope/LLM-Research/Meta-Llama-3-70B-Instruct/"
     tokenizer_path = os.path.join(path, "tokenizer.json")
     server = Llama3CollectiveServer(os.path.join(path, "model.safetensors.index.json"), communicator)
     tokenizer = HuggingFaceTokenizer(tokenizer_path)
@@ -437,9 +435,11 @@ def main():
         request = "Hello!"
         response = chat.send(request)
         while response is not None:
-            print(response, end="", flush=True)
+            if rank == 0:
+                print(response, end="", flush=True)
             response = chat.send(None)
-        print()
+        if rank == 0:
+            print()
 
 
 if __name__ == '__main__':

@@ -2,8 +2,6 @@ import ctypes
 import math
 from typing import Union
 
-from ..core.constant import ConstantTensor
-
 from .kernel.cuda.cast import generate_cast_kernel
 
 from ..core.shape import to_immediate_shape
@@ -44,7 +42,7 @@ def any_cuda_tensor(*args):
 
 def any_scalar_tensor(*args):
     for arg in args:
-        if arg == ScalarTensor or arg == ConstantTensor:
+        if arg == ScalarTensor:
             return True
     return False
 
@@ -117,7 +115,7 @@ def register_elemwise_operator(op_type, op_name, op_fan_in, op_expression, op_py
 
     if op_py is not None:
         @register_dispatch(predicate=lambda *args: any_cuda_tensor(*args) and any_scalar_tensor(*args))
-        def _register_elemwise_decay(op: op_type, *args: Union[CUDATensor, ScalarTensor, ConstantTensor]): # type: ignore
+        def _register_elemwise_decay(op: op_type, *args: Union[CUDATensor, ScalarTensor]): # type: ignore
             from ..functional.generate import fill
             from ..core.dispatch import dispatch
             for arg in args:
