@@ -1,12 +1,13 @@
-import pickle
 import socket
-from typing import Union
+from types import FunctionType
+from typing import Any, List, Union
 
+from .channel import Channel
 from .object import ObjectRef
-from .function import FunctionRef
-from .value import Value
 
 class Controller:
+    peers: List[Channel]
+
     def __init__(self, address: str, port: int) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.address = address
@@ -21,18 +22,18 @@ class Controller:
         while len(peers) < nr_actors:
             connection, _address = self.socket.accept()
             id = len(peers) + len(self.peers)
-            connection.sendall(id.to_bytes(8, "little"))
-            peers.append(connection)
+            channel = Channel(connection)
+            channel.send(id)
+            peers.append(channel)
         self.peers += peers
 
-    def invoke_function(self, function: FunctionRef, *args: Union[Value, ObjectRef]):
+    def invoke_function(self, actor: int, function: FunctionType, *args: Union[ObjectRef, Any]):
         """blocking invoke"""
-        peer: socket.socket = self.peers[function.location]
-        args_bytes = pickle.dumps((function, *args))
-        peer.sendall(len(args_bytes).to_bytes(8, "little"))
-        peer.sendall(args_bytes)
-        result_size_bytes = peer.recv(8)
-        result_size = int.from_bytes(result_size_bytes, "little")
-        result_bytes = peer.recv(result_size)
-        result = pickle.loads(result_bytes)
+        peer = self.peers[actor]
+        print(f"invoking {function.__qualname__} at {actor}")
+        peer.send((function.__qualname__, *args))
+        result = peer.recv()
         return result
+
+    def __len__(self):
+        return len(self.peers)

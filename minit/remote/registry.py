@@ -1,12 +1,10 @@
-from typing import Any
+from typing import Any, Tuple
 
 from types import FunctionType
 
 
 FUNCTIONS = {}
-OBJECT_TYPES = {}
-VALUE_TYPES = {}
-METHODS = {}
+CONSTRUCTORS = {}
 OBJECTS = {}
 
 
@@ -15,17 +13,14 @@ def register_function(fn: FunctionType):
     return fn
 
 
-def get_function(name: str) -> FunctionType:
-    return FUNCTIONS[name]
+def register_constructor(fn: FunctionType):
+    FUNCTIONS[fn.__qualname__] = fn
+    CONSTRUCTORS[fn.__qualname__] = fn
+    return fn
 
 
-def register_object(ty: type):
-    OBJECT_TYPES[ty.__qualname__] = ty
-    return ty
-
-
-def is_object(ty: type):
-    return ty.__qualname__ in OBJECT_TYPES
+def get_function(name: str) -> Tuple[FunctionType, bool]:
+    return (FUNCTIONS[name],name in CONSTRUCTORS)
 
 
 def create_object(obj: Any) -> int:
@@ -42,17 +37,6 @@ def register_method(fn: FunctionType):
     return register_function(fn)
 
 
-def register_value(ty):
-    VALUE_TYPES[ty] = ()
-    return ty
-
-
-register_value(type(None))
-register_value(bool)
-register_value(int)
-register_value(float)
-register_value(str)
-register_object(list)
 register_method(list.append)
 register_method(list.__getitem__)
 register_method(list.__len__)

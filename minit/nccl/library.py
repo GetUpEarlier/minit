@@ -95,7 +95,7 @@ def launch_server() -> bytes:
     size = nccl_unique_id_size()
     id = bytearray(size)
     nccl_create_unique_id((ctypes.c_char * size).from_buffer(id))
-    return id
+    return bytes(id)
 
 def connect_server(nr_ranks: int, rank: int, id: bytes) -> int:
     return nccl_init_rank(nr_ranks, rank, id)
