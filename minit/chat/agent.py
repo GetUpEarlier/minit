@@ -1,5 +1,6 @@
-from typing import Generator, Optional
+from typing import Callable, List, Optional
 
+from ..core.tensor import Tensor
 from .server import Server
 from .tokenizer import Tokenizer
 from .template import Template
@@ -12,51 +13,47 @@ class Agent:
     template: Template
     sampler: Sampler
 
+    class Session:
+        decoder: Callable[[List[int]], Tensor]
+        tokenizer: Tokenizer
+        template: Template
+        sampler: Sampler
+
+        def __init__(self, server: Server, tokenizer: Tokenizer, template: Template, sampler: Sampler, prompt: Optional[str]) -> None:
+            session = server.create_session()
+            def decoder(input_ids: List[int]):
+                return server.decode(session, input_ids)
+            self.decoder = decoder
+            header = template.generate_header()
+            if prompt is not None:
+                header += template.generate_prompt(prompt)
+            if len(header) > 0:
+                self.decoder(tokenizer.tokenize(header))
+            self.template = template
+            self.sampler = sampler
+            self.tokenizer = tokenizer
+
+        def interact(self, user: str) -> str:
+            prefix, postfix = self.template.generate(user)
+            assistant = ""
+            eos = self.template.eos()
+            input_ids = self.tokenizer.tokenize(prefix)
+            while True:
+                output_probs = self.decoder(input_ids)
+                output_id = self.sampler.sample(output_probs)
+                output = self.tokenizer.detokenize([output_id])
+                if output == eos:
+                    break
+                assistant += output
+                input_ids = [output_id]
+            self.decoder(self.tokenizer.tokenize(postfix))
+            return assistant
+
     def __init__(self, server: Server, tokenizer: Tokenizer, template: Template, sampler: Sampler) -> None:
         self.server = server
         self.tokenizer = tokenizer
         self.template = template
         self.sampler = sampler
 
-    def chat(self, prompt: str) -> Generator[Optional[str], str, None]:
-        session = self.server.create_session()
-        text = self.template.generate_prompt(prompt)
-        question = yield None
-        text += self.template.first_chat(question)
-        end_chat = False
-        while True:
-            output_id = None
-            response = ""
-            while True:
-                if output_id is not None:
-                    input_ids = [output_id]
-                else:
-                    input_ids = self.tokenizer.tokenize(text)
-                output_probs = self.server.decode(session, input_ids)
-                output_id = self.sampler.sample(output_probs)
-                text = self.tokenizer.detokenize([output_id])
-                response += text
-                if text == self.template.eos():
-                    end_chat = True
-                if end_chat:
-                    end_chat = False
-                    break
-                pong = yield text
-                assert pong is None
-            question = yield None
-            assert question is not None
-            text = self.template.next_chat(question)
-
-
-def chat_cmdline(agent: Agent, prompt: str):
-    chat = agent.chat(prompt)
-    assert chat.send(None) is None
-    while True:
-        print("User:", end="\t", flush=True)
-        request = input()
-        print("Assistent:", end="\t", flush=True)
-        response = chat.send(request)
-        while response is not None:
-            print(response, end="", flush=True)
-            response = chat.send(None)
-        print()
+    def create_session(self, prompt: str) -> Session:
+        return Agent.Session(self.server, self.tokenizer, self.template, self.sampler, prompt)

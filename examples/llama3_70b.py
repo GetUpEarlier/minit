@@ -8,24 +8,27 @@ from minit.collective.tensor import CollectiveTensor
 from minit.core.torch import TorchTensor
 from minit.cuda.tensor import CUDATensor
 from minit.distributed.communicator import DistributedCommunicator
+from minit.nccl.library import launch_server
 from minit.nccl.tensor import NCCLTensor
-from minit.distributed.group import get_world, initialize_world
+from minit.distributed.group import initialize_world
 import minit.functional as F
 from minit.graph import dump_graphviz
 from minit.module import Module
 from minit.core.tensor import Tensor
-from minit.module.checkpoint import load_from_torch, load_from_safetensors_index
+from minit.module.checkpoint import load_from_safetensors_index
 from minit.module.list import ModuleList
-import minit.cuda.dispatch
 import nvtx
 
 from minit.chat.server import CacheInputSession, CacheKeyValueSession, Server
 from minit.chat.sample import Top1Sampler
 from minit.chat.template import Template
 from minit.chat.tokenizer import HuggingFaceTokenizer
-from minit.chat.agent import Agent, chat_cmdline
+from minit.chat.agent import Agent
+from minit.remote.controller import Controller
+from minit.remote.registry import register_constructor, register_function
 from minit.trace.function import trace_function
 from minit.trace.executor import TraceGraphExecutor
+import minit.cuda.dispatch
 import minit.trace.dispatch
 import minit.collective.dispatch
 import minit.nccl.dispatch
@@ -280,7 +283,6 @@ class Llama3Server(Server[CacheInputSession]):
 class Llama3CollectiveServer(Server[CacheInputSession]):
     communicator: DistributedCommunicator
     model: Llama3LM
-    model_forward = None
 
     def __init__(self, path: str, communicator: DistributedCommunicator) -> None:
         super().__init__()
@@ -401,45 +403,71 @@ class Llama3CachedServer(Server[CacheKeyValueSession]):
 
 
 class Llama3Template(Template):
+    def generate_header(self) -> str:
+        return "<|begin_of_text|>"
+
     def generate_prompt(self, prompt: str) -> str:
-        return f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt}"
+        return f"<|start_header_id|>system<|end_header_id|>\n\n{prompt}<|eot_id|>"
+
+    def generate(self, user: str) -> Tuple[str, str]:
+        return f"<|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", "<|eot_id|>"
 
     def eos(self) -> str:
         return "<|eot_id|>"
+    
 
-    def first_chat(self, chat: str) -> str:
-        return f"<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{chat}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-
-    def next_chat(self, chat: str) -> str:
-        return f"<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{chat}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-
-
-def main():
-    rank, world_size = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
+@register_constructor
+def nccl_connect(id, rank, world_size) -> DistributedCommunicator:
+    communicator = DistributedCommunicator(NCCLTensor.connect(id, rank, world_size))
     initialize_world(rank, world_size)
-    with open(".sync", "rb") as f:
-        unique_id = f.read()
-    version = NCCLTensor.connect(unique_id, get_world().rank, get_world().size)
-    communicator = DistributedCommunicator(version)
+    return communicator
 
+
+# @register_constructor
+# def create_server(path, communicator) -> Llama3CollectiveServer:
+#     return Llama3CollectiveServer(path, communicator)
+
+
+@register_constructor
+def create_session(agent: Agent, prompt: str):
+    return agent.create_session(prompt)
+
+
+@register_function
+def execute_session(session: Agent.Session, user: str):
+    return session.interact(user)
+
+
+@register_constructor
+def create_agent(communicator: DistributedCommunicator):
     path = "/root/autodl-tmp/modelscope/LLM-Research/Meta-Llama-3-70B-Instruct/"
     tokenizer_path = os.path.join(path, "tokenizer.json")
     server = Llama3CollectiveServer(os.path.join(path, "model.safetensors.index.json"), communicator)
     tokenizer = HuggingFaceTokenizer(tokenizer_path)
     sampler = Top1Sampler()
     template = Llama3Template()
-    agent = Agent(server, tokenizer, template, sampler)
-    chat = agent.chat("")
-    assert chat.send(None) is None
-    while True:
-        request = "Hello!"
-        response = chat.send(request)
-        while response is not None:
-            if rank == 0:
-                print(response, end="", flush=True)
-            response = chat.send(None)
-        if rank == 0:
-            print()
+    return Agent(server, tokenizer, template, sampler)
+
+
+def main():
+    controller = Controller("localhost", 0)
+    print(f"serving at {controller.address}:{controller.port}")
+    communicators = []
+    agents = []
+    sessions = []
+    nr_ranks = 4
+    controller.wait_for_connect(nr_ranks)
+    nccl_server = launch_server()
+    for i in range(nr_ranks):
+        communicators.append(controller.invoke_function(i, nccl_connect, nccl_server, i, nr_ranks))
+    for i in range(nr_ranks):
+        agents.append(controller.invoke_function(i, create_agent, communicators[i].get()))
+    for i in range(nr_ranks):
+        sessions.append(controller.invoke_function(i, create_session, agents[i].get(), ""))
+    request = "Hello!"
+    for i, session in enumerate(sessions):
+        response = controller.invoke_function(i, execute_session, session.get(), request)
+    print(response.get())
 
 
 if __name__ == '__main__':
