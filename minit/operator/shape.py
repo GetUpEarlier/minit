@@ -1,6 +1,8 @@
 from dataclasses import dataclass
-from typing import List, Optional
 
+from ..core.meta import MetaTensor
+from ..core.tensor import Tensor
+from ..core.dispatch import register_dispatch
 from ..core.operator import Operator
 
 
@@ -33,3 +35,19 @@ class Transpose(Operator):
 @dataclass
 class Reinterpret(Operator):
     target: str
+
+@register_dispatch(priority=-1)
+def dispatch_add_axis(op: AddAxis, x: Tensor):
+    from ..functional.arith import constant
+    z = MetaTensor(x.shape[:op.axis] + (constant(1, "int32"),) + x.shape[op.axis:], x.dtype)
+    return (z,)
+
+@register_dispatch(priority=-1)
+def dispatch_broadcast(op: Broadcast, x: Tensor, size: Tensor):
+    z = MetaTensor(x.shape[:op.axis] + (size,) + x.shape[op.axis+1:], x.dtype)
+    return (z,)
+
+@register_dispatch(priority=-1)
+def dispatch_expand(op: Expand, x: Tensor, *sizes: Tensor):
+    z = MetaTensor(sizes, x.dtype)
+    return (z,)
