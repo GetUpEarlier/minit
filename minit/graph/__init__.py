@@ -6,8 +6,9 @@ from typing_extensions import Self
 import nvtx
 import graphviz
 
+from ..core.scalar import ScalarTensor
+from ..core.meta import MetaTensor
 from ..core.operator import Operator
-
 from ..core.tensor import Tensor
 
 
@@ -148,11 +149,11 @@ class OperatorNode(NodeBase):
     args: List["TensorNodeRef"]
     outputs: Tuple[Use, ...]
 
-    def __init__(self, graph: "GraphRef", operator: Operator, args: Tuple["TensorNodeRef", ...], nr_outputs: int) -> None:
+    def __init__(self, graph: "GraphRef", operator: Operator, args: Tuple["TensorNodeRef", ...], output_metas: Tuple[MetaTensor, ...]) -> None:
         super().__init__(graph)
         self.operator = operator
         self.args = list(args)
-        self.outputs = tuple(map(lambda i: InternalNode(graph, self.ref, i).use(), range(nr_outputs)))
+        self.outputs = tuple(InternalNode(graph, self.ref, i, meta).use() for i, meta in enumerate(output_metas))
 
     def __repr__(self) -> str:
         return repr({
@@ -170,15 +171,25 @@ class InternalNode(ValueNode):
         "uses",
         "producer",
         "index",
+        "meta",
     ]
 
     producer: "OperatorNodeRef"
     index: int
 
-    def __init__(self, graph: "GraphRef", producer: "OperatorNodeRef", index: int):
+    def __init__(self, graph: "GraphRef", producer: "OperatorNodeRef", index: int, meta: MetaTensor):
         super().__init__(graph)
         self.producer = producer
         self.index = index
+        self.meta = meta
+
+    @property
+    def shape(self):
+        return self.meta.shape
+    
+    @property
+    def dtype(self):
+        return self.meta.dtype
 
 
 class ConstantNode(ValueNode):
@@ -194,13 +205,31 @@ class ConstantNode(ValueNode):
 
     def __init__(self, graph: "GraphRef", value: Tensor):
         super().__init__(graph)
+        assert isinstance(value, ScalarTensor), f"{value} is not ScalarTensor"
         self.value = value
+
+    @property
+    def shape(self):
+        return self.value.shape
+
+    @property
+    def dtype(self):
+        return self.value.dtype
 
 
 class PlaceholderNode(ValueNode):
-    def __init__(self, graph: "GraphRef"):
+    def __init__(self, graph: "GraphRef", meta: MetaTensor):
         super().__init__(graph)
         graph().placeholders.append(self)
+        self.meta = meta
+
+    @property
+    def shape(self):
+        return self.meta.shape
+
+    @property
+    def dtype(self):
+        return self.meta.dtype
 
 
 class ShapeNode(ValueNode):
@@ -220,6 +249,14 @@ class ShapeNode(ValueNode):
         super().__init__(graph)
         self.source = source().use()
         self.axis = axis
+
+    @property
+    def shape(self):
+        return ()
+
+    @property
+    def dtype(self):
+        return "int32"
 
 
 TensorNode = Union[InternalNode, ConstantNode, PlaceholderNode, ShapeNode]
@@ -373,17 +410,18 @@ class GraphBuilder:
     def __init__(self, graph: Graph) -> None:
         self.graph = SubGraph(graph)
 
-    def create_input(self):
-        input = PlaceholderNode(self.graph.graph.ref).ref
+    def create_input(self, meta: MetaTensor):
+        input = PlaceholderNode(self.graph.graph.ref, meta).ref
         self.graph.inputs.append(input)
         return input
 
-    def create_operator(self, operator: Operator, args: Tuple[TensorNodeRef, ...], nr_outputs: int):
-        operator_node = OperatorNode(self.graph.graph.ref, operator, args, nr_outputs)
+    def create_operator(self, operator: Operator, args: Tuple[TensorNodeRef, ...], output_metas: Tuple[MetaTensor, ...]):
+        operator_node = OperatorNode(self.graph.graph.ref, operator, args, output_metas)
         self.graph.operators.append(operator_node.ref)
         return tuple(map(lambda output: output().ref, operator_node.outputs))
 
     def create_constant(self, value: Tensor):
+        assert not isinstance(value, MetaTensor)
         constant = ConstantNode(self.graph.graph.ref, value)
         return constant.ref
 

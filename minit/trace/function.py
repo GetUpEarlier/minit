@@ -1,4 +1,6 @@
-from typing import Any, Callable, Protocol, Tuple
+from typing import Any, Callable, Protocol, Sequence, Tuple
+
+from ..core.meta import MetaTensor
 
 from ..graph import GraphBuilder, SubGraph, Graph, TensorNodeRef
 
@@ -12,9 +14,9 @@ class TraceableFunction(Protocol):
         ...
 
 
-def trace_function(func: TraceableFunction, args: Tuple[Tensor, ...]) -> SubGraph:
+def trace_function(func: TraceableFunction, args: Sequence[Tensor]) -> SubGraph:
     builder = GraphBuilder(Graph())
-    inputs = tuple(TraceTensor(builder, builder.create_input(), arg) for i, arg in enumerate(args))
+    inputs = tuple(TraceTensor(builder, builder.create_input(MetaTensor(arg.shape, arg.dtype)), arg) for i, arg in enumerate(args))
     outputs = func(*inputs)
     output_nodes = []
     for output in outputs:
