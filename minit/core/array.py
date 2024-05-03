@@ -130,6 +130,53 @@ class Array(Generic[_T]):
     def rearrange(self, equation: str, variables: Optional[Dict[str, _T]]=None):
         from ..functional.einops import rearrange
         return rearrange(equation, self, variables)
+    
+    def greater_than(self, y: _T):
+        from ..functional.arith import greater_than
+        return greater_than(self, y)
+
+    def less_than(self, y: _T):
+        from ..functional.arith import less_than
+        return less_than(self, y)
+
+    def greater_equal(self, y: _T):
+        from ..functional.arith import greater_equal
+        return greater_equal(self, y)
+
+    def less_equal(self, y: _T):
+        from ..functional.arith import less_equal
+        return less_equal(self, y)
+
+    def equal(self, y: _T):
+        from ..functional.arith import equal
+        return equal(self, y)
+
+    def not_equal(self, y: _T):
+        from ..functional.arith import not_equal
+        return not_equal(self, y)
+
+    def logical_not(self):
+        from ..functional.arith import logical_not
+        return logical_not(self)
+
+    def logical_and(self, y: _T):
+        from ..functional.arith import logical_and
+        return logical_and(self, y)
+
+    def logical_or(self, y: _T):
+        from ..functional.arith import logical_or
+        return logical_or(self, y)
+
+    @property
+    def size(self):
+        shape = self.shape
+        if len(shape) == 0:
+            from ..functional.arith import constant
+            return constant(1, "int32")
+        size = shape[0]
+        for dim in shape[1:]:
+            size = size * dim
+        return size
 
     __add__ = add
     __radd__ = _reversed(add)
@@ -141,6 +188,15 @@ class Array(Generic[_T]):
     __rtruediv__ = _reversed(divide)
     __pow__ = power
     __rpow__ = _reversed(power)
+    __gt__ = greater_than
+    __lt__ = less_than
+    __ge__ = greater_equal
+    __le__ = less_equal
+    __eq__ = equal
+    __ne__ = not_equal
+    __not__ = logical_not
+    __and__ = logical_and
+    __or__ = logical_or
 
     def __getitem__(self, index) -> _T:
         assert not isinstance(index, tuple)
@@ -158,3 +214,11 @@ class Array(Generic[_T]):
                     return self.slice(index.start, index.stop, 0)
         else:
             return self.slice(index, index+1, 0).remove_axis(0)
+
+    @property
+    def shape(self):
+        raise NotImplementedError()
+
+    @property
+    def dtype(self):
+        raise NotImplementedError()

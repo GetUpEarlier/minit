@@ -2,7 +2,7 @@ from numbers import Number
 from typing import Union
 from ..core.tensor import Tensor
 from ..core.dispatch import dispatch
-from ..operator.arith import Add, Cast, Constant, Cosine, Exponential, Power, Sine, Subtract, Multiply, Divide
+from ..operator.arith import Add, And, Cast, Constant, Cosine, Equal, Exponential, GreaterThan, Not, Power, Sine, Subtract, Multiply, Divide
 from .utils import _broadcast_constant
 
 
@@ -70,3 +70,51 @@ def constant(x: Number, dtype: str):
 def cast(x: Tensor, dtype: str):
     (z,) = dispatch(Cast(dtype), x)
     return z
+
+
+def greater_than(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    (z,) = dispatch(GreaterThan(), x, y)
+    return z
+
+
+def equal(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    (z,) = dispatch(Equal(), x, y)
+    return z
+
+
+def not_equal(x: Tensor, y: Tensor):
+    return logical_not(equal(x, y))
+
+
+def less_than(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    return logical_and(logical_not(greater_than(x, y)), logical_not(equal(x, y)))
+
+
+def logical_and(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    (z,) = dispatch(And(), x, y)
+    return z
+
+
+def logical_not(x: Tensor):
+    (x,) = _broadcast_constant(x)
+    (z,) = dispatch(Not(), x)
+    return z
+
+
+def logical_or(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    return logical_and(logical_not(x), logical_not(y))
+
+
+def greater_equal(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    return logical_or(greater_than(x, y), equal(x, y))
+
+
+def less_equal(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    return logical_not(greater_than(x, y))

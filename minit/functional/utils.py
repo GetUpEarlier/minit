@@ -13,7 +13,7 @@ def _broadcast_constant(*args) -> Tuple[Tensor, ...]:
                 tensor = arg
             else:
                 # assert tensor.shape == arg.shape
-                assert tensor.dtype == arg.dtype
+                assert tensor.dtype == arg.dtype, f"{tensor.dtype} vs {arg.dtype}"
     shape = None
     def broadcast_scalar(scalar):
         nonlocal shape
