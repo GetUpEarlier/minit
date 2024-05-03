@@ -22,5 +22,9 @@ class QuantizedTensor(Tensor, Generic[_Data]):
     def dtype(self):
         return f"q{self._data.dtype}"
 
+    @property
+    def device(self):
+        return self._data.device
+
     def dequantize(self) -> Tensor:
         return dequantize(self._data, self._group, self._zero, self._scale, 0)

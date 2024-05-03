@@ -40,6 +40,10 @@ class CUDATensor(Tensor):
         return self._dtype
 
     @property
+    def device(self):
+        return "cuda"
+
+    @property
     def data_ptr(self) -> int:
         return self.memory._pointer
     

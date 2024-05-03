@@ -28,3 +28,6 @@ class TraceTensor(Tensor):
     def dtype(self) -> str:
         return self._value.dtype
 
+    @property
+    def device(self):
+        return "trace"

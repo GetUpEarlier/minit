@@ -105,3 +105,7 @@ class CollectiveTensor(Tensor, Generic[_Spec]):
     def item(self):
         assert self.spec == CollectiveSpecBroadcast()
         return self._local.item()
+
+    @property
+    def device(self):
+        return self._local.device

@@ -10,3 +10,7 @@ class TorchTensor(Tensor):
     @property
     def value(self):
         return self._value
+
+    @property
+    def device(self):
+        return "torch"

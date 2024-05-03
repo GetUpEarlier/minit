@@ -17,6 +17,10 @@ class NCCLTensor(Tensor):
     def dtype(self):
         return "int64"
 
+    @property
+    def device(self):
+        return "nccl"
+
     @staticmethod
     def connect(unique_id: bytes, rank: int, size: int) -> "NCCLTensor":
         comm = connect_server(size, rank, unique_id)
