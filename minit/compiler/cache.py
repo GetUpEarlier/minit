@@ -21,7 +21,8 @@ def cached_execute(commands: List[str], files: Dict[str, str]) -> str:
         for name, content in files.items():
             with open(os.path.join(cached_path, name), "w+") as f:
                 f.write(content)
-        subprocess.check_call(commands, cwd=cached_path)
+        if len(commands) > 0:
+            subprocess.check_call(commands, cwd=cached_path)
         open(os.path.join(cached_path, ".success"), 'w+').close()
         print(f"compiling completed")
         return cached_path
