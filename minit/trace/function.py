@@ -1,11 +1,8 @@
-from typing import Any, Callable, Protocol, Sequence, Tuple
+from typing import Protocol, Sequence, Tuple
 
 from ..core.meta import MetaTensor
-
-from ..graph import GraphBuilder, SubGraph, Graph, TensorNodeRef
-
+from ..graph import GraphBuilder, SubGraph, Graph, Use
 from .tensor import TraceTensor
-
 from ..core.tensor import Tensor
 
 
@@ -15,27 +12,19 @@ class TraceableFunction(Protocol):
 
 
 def trace_function(func: TraceableFunction, args: Sequence[Tensor]) -> SubGraph:
-    builder = GraphBuilder(Graph())
-    inputs = tuple(TraceTensor(builder, builder.create_input(MetaTensor(arg.shape, arg.dtype)), arg) for i, arg in enumerate(args))
+    graph = Graph()
+    input_nodes = tuple(graph.create_input(MetaTensor(arg.shape, arg.dtype)) for arg in args)
+    builder = GraphBuilder(graph, input_nodes, graph.operators.view())
+    output_nodes = trace_function_on_graph(func, args, builder, [input_node.use_value(None) for input_node in input_nodes])
+    return SubGraph(graph, tuple(input_nodes), graph.operators.view(), tuple(output_nodes))
+
+
+def trace_function_on_graph(func: TraceableFunction, args: Tuple[Tensor, ...], builder: GraphBuilder, uses: Sequence[Use]) -> Tuple[Use, ...]:
+    inputs = tuple(TraceTensor(builder, use, arg) for i, (arg, use) in enumerate(zip(args, uses)))
     outputs = func(*inputs)
     output_nodes = []
     for output in outputs:
         if not isinstance(output, TraceTensor):
             output = TraceTensor(builder, builder.create_constant(output), output)
         output_nodes.append(output._node)
-    graph = builder.build(*output_nodes)
-    return graph
-
-
-def trace_function_on_graph(func: TraceableFunction, args: Tuple[Tensor, ...], graph: Graph, nodes: Tuple[TensorNodeRef, ...]) -> SubGraph:
-    builder = GraphBuilder(graph)
-    inputs = tuple(TraceTensor(builder, node, arg) for i, (arg, node) in enumerate(zip(args, nodes)))
-    outputs = func(*inputs)
-    output_nodes = []
-    for output in outputs:
-        if not isinstance(output, TraceTensor):
-            output = TraceTensor(builder, builder.create_constant(output), output)
-        output_nodes.append(output._node)
-    result_graph = builder.build(*output_nodes)
-    result_graph.inputs = list(nodes)
-    return result_graph
+    return builder.build(*output_nodes)

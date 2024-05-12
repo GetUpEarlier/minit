@@ -1,12 +1,10 @@
-from typing import Literal, Union
+from typing import List, Literal, Union
 
 from ..core.meta import MetaTensor
-
 from ..lazy.tensor import Expression, LazyTensor
-
 from ..core.tensor import Tensor
 from .tensor import TraceTensor
-from ..graph import GraphBuilder, InternalNode, ConstantNode, OperatorNode
+from ..graph import GraphBuilder, Use
 from ..core.operator import Operator
 from ..core.device_operator import DeviceOperator
 from ..core.dispatch import dispatch, register_dispatch
@@ -22,7 +20,7 @@ def any_trace_tensor(*args):
 
 def _dispatch_trace(op: Operator, *args: Union[TraceTensor, Tensor]):
     arg_values = []
-    arg_nodes = []
+    arg_nodes: List[Use] = []
     builder = None
     for arg in args:
         if isinstance(arg, TraceTensor):
@@ -43,8 +41,8 @@ def _dispatch_trace(op: Operator, *args: Union[TraceTensor, Tensor]):
             arg_nodes.append(builder.create_constant(arg))
     output_values = dispatch(op, *arg_values)
     output_metas = tuple(MetaTensor(output_value.shape, output_value.dtype) for output_value in output_values)
-    output_nodes = builder.create_operator(op, arg_nodes, output_metas)
-    return tuple(TraceTensor(builder, output_node, output_value) for output_node, output_value in zip(output_nodes, output_values))
+    output_uses = builder.create_operator(op, arg_nodes, output_metas)
+    return tuple(TraceTensor(builder, output_use, output_value) for output_use, output_value in zip(output_uses, output_values))
 
 
 def trace_evaluate(builder: GraphBuilder, expression: Expression):

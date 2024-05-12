@@ -1,14 +1,14 @@
-from typing import Any, Iterator, Optional, Tuple
+from typing import Dict, Generic, List, Optional, Sequence, Set, Tuple, TypeVar
 
-from ..trace.function import trace_function, trace_function_on_graph
-from . import ConstantNode, Graph, InternalNode, LinkedList, NodeRef, OperatorNodeRef, PlaceholderNode, ShapeNode, SubGraph, TensorNode, TensorNodeRef
+from ..trace.function import trace_function_on_graph
+from . import Graph, GraphBuilder, LinkedListIterator, LinkedListView, OperatorNode, ShapeUse, SubGraph, TensorNode, ValueUse
 from ..core.tensor import Tensor
 
 
 class OptimizationPass:
     _pattern: Optional[SubGraph] = None
 
-    def make_inputs(self) -> Tuple[Tensor, ...]:
+    def make_inputs(self) -> Sequence[Tensor]:
         raise NotImplementedError()
 
     def describe(self, *inputs: Tensor) -> Tuple[Tensor, ...]:
@@ -27,107 +27,100 @@ class OptimizationPass:
             return self._pattern
         inputs = self.make_inputs()
         self._pattern = trace_function(self.describe, inputs)
+        print("pattern", self._pattern)
         return self._pattern
-    
+
+
+_T = TypeVar("_T")
+
+
+class ListIterator(Generic[_T]):
+    items: List[_T]
+    index: int = 0
+
+    def __init__(self, items: List[_T]):
+        self.items = items
+
+    def __next__(self):
+        if self.index >= len(self.items):
+            raise StopIteration
+        value = self.items[self.index]
+        self.index += 1
+        return value
+
+    def __iter__(self):
+        return self
+
 
 class Matcher:
-    pattern: SubGraph
+    pattern: Graph
 
-    def __init__(self, pattern: SubGraph) -> None:
+    def __init__(self, pattern: Graph) -> None:
         self.pattern = pattern
 
-    def match(self, target_graph: Graph, target_operators: LinkedList[OperatorNodeRef]) -> Optional[SubGraph]:
-        pattern_nodes = {}
-        target_nodes = {}
-        target_nodes_rev = {}
-
-        pattern_input_nodes = {}
-        next_node_id = 0
-
-        target_input_nodes = []
-        target_output_nodes = []
-
-        for pattern_input_ref in self.pattern.inputs:
-            node_id = next_node_id
-            next_node_id += 1
-            pattern_nodes[pattern_input_ref] = node_id
-            pattern_input_nodes[pattern_input_ref] = node_id
-
-        def check_node(pattern_node_ref, target_node_ref) -> bool:
-            assert isinstance(pattern_node_ref, NodeRef)
-            assert isinstance(target_node_ref, NodeRef)
-            # capture input
-            if pattern_node_ref in pattern_input_nodes:
-                if target_node_ref in target_nodes:
-                    # disallow internal node as input for now
-                    return None
-                target_nodes[target_node_ref] = pattern_input_nodes[pattern_arg_ref]
-                target_nodes_rev[pattern_input_nodes[pattern_arg_ref]] = target_arg_ref
-                target_input_nodes.append(target_node_ref)
-                return True
-            if pattern_node_ref not in pattern_nodes:
-                pattern_node = pattern_node_ref()
-                target_node = target_node_ref()
-                if isinstance(pattern_node, ConstantNode):
-                    if not isinstance(target_node, ConstantNode):
-                        return False
-                    return pattern_node.value.item() == target_node.value.item()
-                elif isinstance(pattern_node, ShapeNode):
-                    if not isinstance(target_node, ShapeNode):
-                        return False
-                    return check_node(pattern_node.source().ref, target_node.source().ref)
-                else:
-                    assert False
-            if not target_node_ref in target_nodes:
-                return False
-            return pattern_nodes[pattern_node_ref] == target_nodes[target_node_ref]
-        
-        if len(list(self.pattern.operators)) != len(list(target_operators)):
-            return None
-        
-        target_operators_node = target_operators.head.next
-        target_operators_tail = target_operators.tail
-        pattern_operators_node = self.pattern.operators.head.next
-        pattern_operators_tail = self.pattern.operators.tail
-
-        while target_operators_node != target_operators_tail and pattern_operators_node != pattern_operators_tail:
-            pattern_operator_ref = pattern_operators_node.value
-            target_operator_ref = target_operators_node.value
-            pattern_operator = pattern_operator_ref()
-            target_operator = target_operator_ref()
-            if pattern_operator.operator != target_operator.operator:
-                # mismatch
+    def match(self, graph: Graph, operators_head: LinkedListIterator[OperatorNode]) -> Optional[SubGraph]:
+        pattern = self.pattern
+        nr_inputs = len(pattern.inputs)
+        operators = operators_head.clone()
+        variables = {}
+        pattern_variables = {}
+        for i, input in enumerate(pattern.inputs):
+            pattern_variables[input] = i
+        variable_id = nr_inputs
+        users: Set[OperatorNode] = set()
+        id2variable: Dict[int, TensorNode] = {}
+        pattern_outputs = set(pattern_output.target for pattern_output in pattern.outputs)
+        for i, pattern_operator in enumerate(pattern.operators):
+            try:
+                operator = next(operators)
+            except StopIteration:
                 return None
-            if len(pattern_operator.args) != len(target_operator.args):
-                # mismatch
+            if operator.operator != pattern_operator.operator:
                 return None
-            for pattern_arg_ref, target_arg_ref in zip(pattern_operator.args, target_operator.args):
-                if not check_node(pattern_arg_ref, target_arg_ref):
+            if len(operator.args) != len(pattern_operator.args):
+                return None
+            for arg, pattern_arg in zip(operator.args, pattern_operator.args):
+                if arg.axis != pattern_arg.axis:
                     return None
-            for pattern_output_use, target_output_use in zip(pattern_operator.outputs, target_operator.outputs):
-                pattern_output_ref = pattern_output_use().ref
-                target_output_ref = target_output_use().ref
-                node_id = next_node_id
-                next_node_id += 1
-                pattern_nodes[pattern_output_ref] = node_id
-                target_nodes[target_output_ref] = node_id
-                target_nodes_rev[node_id] = target_output_ref
-            pattern_operators_node = pattern_operators_node.next
-            target_operators_node = target_operators_node.next
-
-        if pattern_operators_node != pattern_operators_tail:
+                # capture input
+                arg_id = pattern_variables[pattern_arg.target]
+                if arg.target not in variables:
+                    if arg_id >= nr_inputs:
+                        return None
+                    variables[arg.target] = arg_id
+                    id2variable[arg_id] = arg.target
+                if variables[arg.target] != arg_id:
+                    return None
+            if operator in users:
+                users.remove(operator)
+            for output, pattern_output in zip(operator.outputs, pattern_operator.outputs):
+                variables[output] = variable_id
+                id2variable[variable_id] = output
+                pattern_variables[pattern_output] = variable_id
+                if pattern_output not in pattern_outputs:
+                    for use in output.uses:
+                        user = use().user
+                        if user is not None:
+                            assert user != operator
+                            users.add(user)
+                variable_id += 1
+        if len(users) != 0:
+            for user in users:
+                assert user.valid
+            print(f"failed for unresolved uses: {users}")
             return None
-
-        for pattern_output_use in self.pattern.outputs:
-            pattern_output_ref = pattern_output_use().ref
-            assert pattern_output_ref in pattern_nodes
-            target_output_nodes.append(target_nodes_rev[pattern_nodes[pattern_output_ref]]().use())
-
-        result_graph = SubGraph(target_graph)
-        result_graph.inputs = target_input_nodes
-        result_graph.operators = target_operators
-        result_graph.outputs = target_output_nodes
-        return result_graph
+        inputs = []
+        outputs = []
+        for pattern_input in pattern.inputs:
+            inputs.append(id2variable[pattern_variables[pattern_input]].use_value(None))
+        for pattern_output in pattern.outputs:
+            if isinstance(pattern_output, ShapeUse):
+                outputs.append(id2variable[pattern_variables[pattern_output.target]].use_shape(None, pattern_output.axis))
+            elif isinstance(pattern_output, ValueUse):
+                outputs.append(id2variable[pattern_variables[pattern_output.target]].use_value(None))
+            else:
+                assert False
+        return SubGraph(graph, inputs, LinkedListView(operators_head.current, operators.current), outputs)
 
 
 class TraceGraphOptimizer:
@@ -136,19 +129,28 @@ class TraceGraphOptimizer:
     def __init__(self, graph: SubGraph) -> None:
         self.graph = graph
 
-    def apply(self, optimization_pass: OptimizationPass):
+    def apply(self, optimization_pass: OptimizationPass) -> int:
         pattern = optimization_pass.pattern
         matcher = Matcher(pattern)
-        operators = LinkedList()
-        operators.head = self.graph.operators.head
-        operators.tail = self.graph.operators.tail
-        operators.check()
-        while operators.head.next != operators.tail:
-            result = matcher.match(self.graph.graph, operators)
+        operators = iter(self.graph.operators)
+        count = 0
+        while True:
+            result = matcher.match(self.graph, operators)
             if result is not None:
+                count += 1
                 rewrite = optimization_pass.rewrite
-                rewrite_result = trace_function_on_graph(rewrite, optimization_pass.make_inputs(), self.graph.graph, result.inputs)
-                self.graph.replace(result, rewrite_result)
+                old_operators = result.operators.tolist()
+                for operator in old_operators:
+                    operator.destroy()
+                result.operators.clear()
+                builder = GraphBuilder(self.graph.graph, result.inputs, result.operators)
+                rewrite_outputs = trace_function_on_graph(rewrite, optimization_pass.make_inputs(), builder, result.inputs)
+                for output, rewrite_output in zip(result.outputs, rewrite_outputs, strict=True):
+                    assert output.axis == rewrite_output.axis
+                    output.target.replace(rewrite_output.target)
             else:
-                operators.head = operators.head.next
-                operators.check()
+                try:
+                    next(operators)
+                except StopIteration:
+                    break
+        return count

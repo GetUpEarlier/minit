@@ -8,7 +8,7 @@ from ..core.dispatch import dispatch, register_dispatch
 from ..core.tensor import Tensor
 from ..core.operator import Operator
 from ..core.scalar import ScalarTensor
-from ..graph import ConstantNode, ShapeNode, SubGraph, TensorNode
+from ..graph import ConstantNode, SubGraph, TensorNode
 from .. import operator
 
 @dataclass

@@ -1,18 +1,11 @@
-import builtins
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Iterable, List, Optional, Sequence, Tuple, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, Iterable, List, Optional, Sequence, Tuple, TypeVar, Union
 import weakref
-from typing_extensions import Self
-import nvtx
-import graphviz
 
 from ..core.scalar import ScalarTensor
 from ..core.meta import MetaTensor
 from ..core.operator import Operator
 from ..core.tensor import Tensor
-
-
-_Node = TypeVar("_Node", covariant=True)
 
 
 @dataclass(frozen=True)
@@ -35,82 +28,91 @@ class GraphRef:
         assert isinstance(self.graph, weakref.ref)
 
 
-class NodeRef(Generic[_Node]):
-    __slots__ = [
-        "graph",
-        "id",
-        "type",
-    ]
-
-    graph: GraphRef
-    id: int
-    type: Type[_Node]
-
-    def __init__(self, graph: GraphRef, id: int, type: Type[_Node]):
-        self.graph = graph
-        self.id = id
-        self.type = type
-
-    def __call__(self) -> _Node:
-        return self.graph().nodes[self.id]
-
-    @property
-    def valid(self):
-        return self.graph.valid
-
-    def __repr__(self) -> str:
-        return f"NodeRef({self.id}, {self.type})"
-
-
 class NodeBase:
     __slots__ = [
         "graph",
-        "id",
-        "ref",
+        "valid",
     ]
 
     graph: "GraphRef"
-    id: int
-    ref: NodeRef[Self]
+    valid: bool
 
     def __init__(self, graph: "GraphRef") -> None:
         self.graph = graph
-        nodes = graph().nodes
-        id = len(nodes)
-        nodes.append(self)
-        self.id = id
-        self.ref = NodeRef(self.graph, self.id, type(self))
+        self.valid = True
 
 
-class Use():
-    __slots__ = [
-        "value",
-        "__weakref__",
-    ]
+# class Use:
+#     value: "ValueNode"
 
-    def __init__(self, value: NodeRef["ValueNode"]) -> None:
-        assert isinstance(value, NodeRef)
-        self.value = value
+#     def __init__(self, value: "ValueNode") -> None:
+#         assert isinstance(value, ValueNode)
+#         self.value = value
+
+#     def __call__(self):
+#         return self.value
+
+#     def __del__(self):
+#         if self.value.valid:
+#             self.value.uses.remove(weakref.ref(self))
+
+
+class ValueUse:
+    target: "ValueNode"
+    user: Optional["OperatorNode"]
+    axis = None
+
+    def __init__(self, target: "ValueNode", user: Optional["OperatorNode"]) -> None:
+        assert isinstance(target, ValueNode)
+        self.target = target
+        self.user = user
+
+    def clone(self, user: "OperatorNode"):
+        return self.target.use_value(user)
+    
+    def shape(self, axis: int):
+        return self.target.use_shape(None, axis)
 
     def __call__(self):
-        return self.value()
+        return self.target
 
     def __del__(self):
-        if self.value.valid:
-            self.value().uses.remove(weakref.ref(self))
+        if self.target.valid:
+            self.target.uses.remove(weakref.ref(self))
 
-    def __repr__(self) -> str:
-        return f"Use{{{self.value}}}"
+    def __repr__(self):
+        return f"{self.target}.value"
+
+
+class ShapeUse:
+    target: "ValueNode"
+    user: Optional["OperatorNode"]
+    axis: int
+
+    def __init__(self, target: "ValueNode", user: Optional["OperatorNode"], axis: int) -> None:
+        assert isinstance(target, ValueNode)
+        self.target = target
+        self.user = user
+        self.axis = axis
+
+    def clone(self, user: "OperatorNode"):
+        return self.target.use_shape(user, self.axis)
+
+    def __call__(self):
+        return self.target
+
+    def __del__(self):
+        if self.target.valid:
+            self.target.uses.remove(weakref.ref(self))
+
+    def __repr__(self):
+        return f"{self.target}.shape[{self.axis}]"
+
+
+Use = Union[ValueUse, ShapeUse]
 
 
 class ValueNode(NodeBase):
-    __slots__ = [
-        "graph",
-        "id",
-        "ref",
-        "uses",
-    ]
-
     if TYPE_CHECKING:
         uses: List[weakref.ref[Use]]
     else:
@@ -120,40 +122,52 @@ class ValueNode(NodeBase):
         super().__init__(graph)
         self.uses = []
 
-    def use(self):
-        use = Use(self.ref)
+    def use_shape(self, user: Optional["OperatorNode"], axis: int):
+        use = ShapeUse(self, user, axis)
         self.uses.append(weakref.ref(use))
         return use
 
-    def replace(self, new: NodeRef["ValueNode"]):
-        assert isinstance(new, NodeRef)
-        uses = self.uses
-        for use in uses:
-            use().value = new
-        new().uses.extend(uses)
-        assert self.uses is uses
+    def use_value(self, user: Optional["OperatorNode"]):
+        if isinstance(self, InternalNode):
+            assert user != self.producer
+        use = ValueUse(self, user)
+        self.uses.append(weakref.ref(use))
+        return use
+    
+    def replace(self, target: "ValueNode"):
+        if self is target:
+            return
+        for use in self.uses:
+            use().target = target
+        target.uses += self.uses
         self.uses.clear()
+        self.valid = False
 
 
 class OperatorNode(NodeBase):
     __slots__ = [
         "graph",
-        "id",
-        "ref",
+        "valid",
         "operator",
         "args",
         "outputs",
     ]
 
     operator: Operator
-    args: List["TensorNodeRef"]
-    outputs: Tuple[Use, ...]
+    args: List[Use]
+    outputs: Tuple["InternalNode", ...]
 
-    def __init__(self, graph: "GraphRef", operator: Operator, args: Tuple["TensorNodeRef", ...], output_metas: Tuple[MetaTensor, ...]) -> None:
+    def __init__(self, graph: "GraphRef", operator: Operator, args: Sequence[Use], output_metas: Tuple[MetaTensor, ...]) -> None:
         super().__init__(graph)
         self.operator = operator
-        self.args = list(args)
-        self.outputs = tuple(InternalNode(graph, self.ref, i, meta).use() for i, meta in enumerate(output_metas))
+        self.args = [arg.clone(self) for arg in args]
+        self.outputs = tuple(InternalNode(graph, self, i, meta) for i, meta in enumerate(output_metas))
+
+    def destroy(self):
+        del self.operator
+        del self.args
+        del self.outputs
+        self.valid = False
 
     def __repr__(self) -> str:
         return repr({
@@ -166,18 +180,18 @@ class OperatorNode(NodeBase):
 class InternalNode(ValueNode):
     __slots__ = [
         "graph",
-        "id",
-        "ref",
+        "valid",
         "uses",
         "producer",
         "index",
         "meta",
     ]
 
-    producer: "OperatorNodeRef"
+    producer: "OperatorNode"
     index: int
+    meta: MetaTensor
 
-    def __init__(self, graph: "GraphRef", producer: "OperatorNodeRef", index: int, meta: MetaTensor):
+    def __init__(self, graph: "GraphRef", producer: "OperatorNode", index: int, meta: MetaTensor):
         super().__init__(graph)
         self.producer = producer
         self.index = index
@@ -190,13 +204,15 @@ class InternalNode(ValueNode):
     @property
     def dtype(self):
         return self.meta.dtype
+    
+    def __repr__(self):
+        return "InternalNode()"
 
 
 class ConstantNode(ValueNode):
     __slots__ = [
         "graph",
-        "id",
-        "ref",
+        "valid",
         "uses",
         "value",
     ]
@@ -218,9 +234,16 @@ class ConstantNode(ValueNode):
 
 
 class PlaceholderNode(ValueNode):
+    __slots__ = [
+        "graph",
+        "valid",
+        "uses",
+        "value",
+        "meta",
+    ]
+
     def __init__(self, graph: "GraphRef", meta: MetaTensor):
         super().__init__(graph)
-        graph().placeholders.append(self)
         self.meta = meta
 
     @property
@@ -230,124 +253,184 @@ class PlaceholderNode(ValueNode):
     @property
     def dtype(self):
         return self.meta.dtype
+    
+    def __repr__(self):
+        return "PlaceholderNode()"
 
 
-class ShapeNode(ValueNode):
-    __slots__ = [
-        "graph",
-        "id",
-        "ref",
-        "uses",
-        "source",
-        "axis",
-    ]
+# class ShapeNode(ValueNode):
+#     __slots__ = [
+#         "graph",
+#         "valid",
+#         "uses",
+#         "source",
+#         "axis",
+#     ]
 
-    source: Use
-    axis: int
+#     source: Use
+#     axis: int
 
-    def __init__(self, graph: "GraphRef", source: "TensorNodeRef", axis: int):
-        super().__init__(graph)
-        self.source = source().use()
-        self.axis = axis
+#     def __init__(self, graph: "GraphRef", source: "TensorNode", axis: int):
+#         super().__init__(graph)
+#         self.source = source().use()
+#         self.axis = axis
 
-    @property
-    def shape(self):
-        return ()
+#     @property
+#     def shape(self):
+#         return ()
 
-    @property
-    def dtype(self):
-        return "int32"
+#     @property
+#     def dtype(self):
+#         return "int32"
 
 
-TensorNode = Union[InternalNode, ConstantNode, PlaceholderNode, ShapeNode]
-TensorNodeRef = NodeRef[TensorNode]
-OperatorNodeRef = NodeRef[OperatorNode]
+TensorNode = Union[InternalNode, ConstantNode, PlaceholderNode]
 Node = Union[TensorNode, OperatorNode]
-
-
-class Graph:
-    __slots__ = [
-        "placeholders",
-        "nodes",
-        "__weakref__",
-    ]
-
-    placeholders: List[NodeRef[PlaceholderNode]]
-    nodes: List[Node]
-
-    def __init__(self) -> None:
-        self.placeholders = []
-        self.nodes = []
-
-    @property
-    def ref(self):
-        return GraphRef(weakref.ref(self))
 
 
 _T = TypeVar("_T")
 
-class LinkedList(Generic[_T]):
-    __slots__ = [
-        "head",
-        "tail",
-    ]
+class LinkedListVertex(Generic[_T]):
+    prev: "LinkedListEdge[_T]"
+    next: "LinkedListEdge[_T]"
 
-    class Node(Generic[_T]):
-        __slots__ = [
-            "value",
-            "prev",
-            "next",
-            "__weakref__",
-        ]
+class LinkedListEdge(Generic[_T]):
+    prev: "LinkedListVertex[_T]"
+    next: "LinkedListVertex[_T]"
+    value: Optional[_T]
 
-        value: Optional[_T]
-        if TYPE_CHECKING:
-            prev: Optional[weakref.ref["LinkedList.Node[_T]"]]
-        else:
-            prev: Optional[weakref.ref]
-        next: Optional["LinkedList.Node[_T]"]
+    def __init__(self, prev: "LinkedListVertex[_T]", next: "LinkedListVertex[_T]", value: Optional[_T] = None) -> None:
+        super().__init__()
+        self.prev = prev
+        self.next = next
+        self.value = value
+        prev.next = self
+        next.prev = self
 
-        def __init__(self, value: Optional[_T]) -> None:
-            self.value = value
-            self.prev = None
-            self.next = None
+class LinkedListIterator(Generic[_T]):
+    current: LinkedListVertex[_T]
+    tail: LinkedListVertex[_T]
 
-    def __init__(self) -> None:
-        self.head = LinkedList.Node(None)
-        self.tail = LinkedList.Node(None)
-        self.head.next = self.tail
-        self.tail.prev = weakref.ref(self.head)
+    def __init__(self, head: LinkedListVertex[_T], tail: LinkedListVertex[_T]):
+        self.current = head
+        self.tail = tail
 
-    def append(self, value: _T):
-        assert value is not None
-        node = LinkedList.Node(value)
-        assert self.tail.prev is not None
-        tail_prev = self.tail.prev()
-        assert tail_prev is not None
-        tail_prev.next = node
-        self.tail.prev = weakref.ref(node)
-        node.next = self.tail
-        node.prev = weakref.ref(tail_prev)
+    def clone(self):
+        return LinkedListIterator(self.current, self.tail)
+
+    def __next__(self) -> _T:
+        while self.current is not self.tail:
+            value = self.current.next.value
+            self.current = self.current.next.next
+            if value is not None:
+                return value
+        raise StopIteration
+
+
+class LinkedList(Generic[_T], Iterable[_T]):
+    head: LinkedListVertex[_T]
+    tail: LinkedListVertex[_T]
+
+    def __init__(self):
+        self.head = LinkedListVertex()
+        self.tail = LinkedListVertex()
+        LinkedListEdge(self.head, self.tail, None)
+        LinkedListEdge(self.tail, self.head, None)
+
+    def view(self):
+        return LinkedListView(self.head, self.tail)
 
     def tolist(self) -> List[_T]:
         result = []
-        node = self.head.next
+        node = self.head
         while node is not self.tail:
-            result.append(node.value)
-            node = node.next
+            if node.next.value is not None:
+                result.append(node.next.value)
+            node = node.next.next
         return result
 
-    def __iter__(self):
-        node = self.head.next
+    def __iter__(self) -> LinkedListIterator[_T]:
+        return LinkedListIterator(self.head, self.tail)
+
+
+class LinkedListView(Generic[_T], Iterable[_T]):
+    head: LinkedListVertex[_T]
+    tail: LinkedListVertex[_T]
+
+    def __init__(self, head: LinkedListVertex[_T], tail: LinkedListVertex[_T]) -> None:
+        super().__init__()
+        assert head is not tail
+        self.head = head
+        self.tail = tail
+
+    def tolist(self) -> List[_T]:
+        result = []
+        node = self.head
         while node is not self.tail:
-            yield node.value
-            node = node.next
+            if node.next.value is not None:
+                result.append(node.next.value)
+            node = node.next.next
+        return result
+    
+    def clear(self):
+        node = self.head.next.next
+        while node is not self.tail:
+            next = node.next.next
+            node.prev = None
+            node.next = None
+            node = next
+        LinkedListEdge(self.head, self.tail, None)
 
-    def check(self):
-        list(self)
+    def fill(self, list: List[_T]):
+        node = self.head.next.next
+        while node is not self.tail:
+            next = node.next.next
+            node.prev = None
+            node.next = None
+            node = next
+        if len(list) == 0:
+            LinkedListEdge(self.head, self.tail, None)
+        else:
+            node = self.head
+            for item in list:
+                new_node = LinkedListVertex()
+                LinkedListEdge(node, new_node, item)
+                node = new_node
 
-    head: Node[_T]
-    tail: Node[_T]
+    def append(self, value: _T):
+        node = LinkedListVertex()
+        self.tail.prev.next = node
+        node.prev = self.tail.prev
+        LinkedListEdge(node, self.tail, value)
+
+    def __iter__(self) -> LinkedListIterator[_T]:
+        return LinkedListIterator(self.head, self.tail)
+
+
+class Graph:
+    __slots__ = [
+        "inputs",
+        "operators",
+        "outputs",
+        "__weakref__",
+    ]
+
+    inputs: List[PlaceholderNode]
+    operators: "LinkedList[OperatorNode]"
+    outputs: List[Use]
+
+    def __init__(self) -> None:
+        self.inputs = []
+        self.operators = LinkedList()
+        self.outputs = []
+
+    def create_input(self, meta: MetaTensor):
+        self.inputs.append(PlaceholderNode(self.ref, meta))
+        return self.inputs[-1]
+
+    @property
+    def ref(self):
+        return GraphRef(weakref.ref(self))
 
 
 class SubGraph:
@@ -359,28 +442,15 @@ class SubGraph:
     ]
 
     graph: Graph
-    inputs: List[TensorNodeRef]
-    operators: LinkedList[OperatorNodeRef]
+    inputs: List[Use]
+    operators: LinkedListView[OperatorNode]
     outputs: List[Use]
 
-    def __init__(self, graph: Graph) -> None:
+    def __init__(self, graph: Graph, inputs: Sequence[Use], operators: LinkedListView[OperatorNode], outputs: Sequence[Use]) -> None:
         self.graph = graph
-        self.inputs = []
-        self.operators = LinkedList()
-        self.outputs = []
-
-    def replace(self, old: "SubGraph", new: "SubGraph"):
-        assert old.inputs == new.inputs
-        node = old.operators.head
-        while node.next != old.operators.tail:
-            node = node.next
-        assert new.operators.head.next != new.operators.tail
-        old.operators.tail.prev = new.operators.tail.prev
-        old.operators.tail.prev().next = old.operators.tail
-        old.operators.head.next = new.operators.head.next
-        old.operators.head.next.prev = weakref.ref(old.operators.head)
-        for old_output, new_output in zip(old.outputs, new.outputs):
-            old_output().replace(new_output().ref)
+        self.inputs = list(inputs)
+        self.operators = operators
+        self.outputs = list(outputs)
 
     def __repr__(self):
         return repr({
@@ -389,74 +459,28 @@ class SubGraph:
             "outputs": self.outputs,
         })
 
-    def values(self) -> Iterable[NodeRef["ValueNode"]]:
-        for input_ref in self.inputs:
-            yield input_ref
-        for output_ref in self.outputs:
-            yield output_ref
-
-    def replace_value(self, old: NodeRef["ValueNode"], new: NodeRef["ValueNode"]):
-        for i in range(len(self.inputs)):
-            if self.inputs[i] == old:
-                self.inputs[i] = new
-        for i in range(len(self.outputs)):
-            if self.outputs[i] == old:
-                self.outputs[i] = new
-
 
 class GraphBuilder:
-    graph: SubGraph
+    graph: Graph
+    inputs: List[Use]
+    operators: LinkedListView[OperatorNode]
 
-    def __init__(self, graph: Graph) -> None:
-        self.graph = SubGraph(graph)
+    def __init__(self, graph: Graph, inputs: List[Use], operators: LinkedListView[OperatorNode]) -> None:
+        assert isinstance(graph, Graph)
+        assert isinstance(operators, LinkedListView)
+        self.graph = graph
+        self.inputs = list(inputs)
+        self.operators = operators
 
-    def create_input(self, meta: MetaTensor):
-        input = PlaceholderNode(self.graph.graph.ref, meta).ref
-        self.graph.inputs.append(input)
-        return input
-
-    def create_operator(self, operator: Operator, args: Tuple[TensorNodeRef, ...], output_metas: Tuple[MetaTensor, ...]):
-        operator_node = OperatorNode(self.graph.graph.ref, operator, args, output_metas)
-        self.graph.operators.append(operator_node.ref)
-        return tuple(map(lambda output: output().ref, operator_node.outputs))
+    def create_operator(self, operator: Operator, args: Sequence[Use], output_metas: Tuple[MetaTensor, ...]) -> Tuple[ValueNode, ...]:
+        operator_node = OperatorNode(self.graph.ref, operator, args, output_metas)
+        self.operators.append(operator_node)
+        return tuple(output.use_value(None) for output in operator_node.outputs)
 
     def create_constant(self, value: Tensor):
         assert not isinstance(value, MetaTensor)
-        constant = ConstantNode(self.graph.graph.ref, value)
-        return constant.ref
+        constant = ConstantNode(self.graph.ref, value)
+        return constant.use_value(None)
 
-    def build(self, *outputs: TensorNodeRef) -> SubGraph:
-        self.graph.outputs = list(map(lambda output: output().use(), outputs))
-        return self.graph
-    
-
-def dump_graphviz(subgraph: SubGraph):
-    dot = graphviz.Digraph('round-table', comment='The Round Table')
-    nodes = {}
-
-    def create_node(node_ref: NodeRef):
-        if node_ref not in nodes:
-            prefix = node_ref.type.__name__
-            dot.node(f"{prefix}_{node_ref.id}")
-            nodes[node_ref] = f"{prefix}_{node_ref.id}"
-        return nodes[node_ref]
-
-    def create_edge(source: NodeRef, target: NodeRef):
-        dot.edge(create_node(source), create_node(target))
-
-    for input in subgraph.inputs:
-        create_node(input)
-
-    for operator_ref in subgraph.operators:
-        operator = operator_ref()
-        for operator_input in operator.args:
-            if operator_input.type is ShapeNode:
-                create_edge(operator_input().source.value, operator_input)
-            create_edge(operator_input, operator_ref)
-        for operator_output in operator.outputs:
-            create_edge(operator_ref, operator_output.value)
-
-    for output in subgraph.outputs:
-        create_node(output.value)
-
-    return dot
+    def build(self, *outputs: Use) -> Tuple[Use, ...]:
+        return outputs
