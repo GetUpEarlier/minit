@@ -27,7 +27,6 @@ class OptimizationPass:
             return self._pattern
         inputs = self.make_inputs()
         self._pattern = trace_function(self.describe, inputs)
-        print("pattern", self._pattern)
         return self._pattern
 
 
@@ -107,7 +106,6 @@ class Matcher:
         if len(users) != 0:
             for user in users:
                 assert user.valid
-            print(f"failed for unresolved uses: {users}")
             return None
         inputs = []
         outputs = []

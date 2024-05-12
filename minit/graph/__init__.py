@@ -431,6 +431,13 @@ class Graph:
     @property
     def ref(self):
         return GraphRef(weakref.ref(self))
+    
+    def __del__(self):
+        del self.inputs
+        del self.outputs
+        for operator in self.operators:
+            operator.destroy()
+        del self.operators
 
 
 class SubGraph:
