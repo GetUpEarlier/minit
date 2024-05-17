@@ -1,6 +1,7 @@
 from typing import Any, Dict, Generic, Optional, Set, Tuple, TypeVar
 from typing_extensions import Self
 
+from ..core.shape import to_symbolic_shape
 from ..core.tensor import Tensor
 from ..core.meta import MetaTensor
 
@@ -23,7 +24,7 @@ class Module(Generic[_Parent]):
 
     def register_buffer(self, name: str, shape: Tuple[int, ...], dtype: str, buffer: Optional[Tensor] = None):
         if buffer is None:
-            buffer = MetaTensor(shape, dtype)
+            buffer = MetaTensor(to_symbolic_shape(shape), dtype)
         self.buffers[name] = ()
         return buffer
 

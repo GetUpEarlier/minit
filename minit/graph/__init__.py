@@ -258,32 +258,6 @@ class PlaceholderNode(ValueNode):
         return "PlaceholderNode()"
 
 
-# class ShapeNode(ValueNode):
-#     __slots__ = [
-#         "graph",
-#         "valid",
-#         "uses",
-#         "source",
-#         "axis",
-#     ]
-
-#     source: Use
-#     axis: int
-
-#     def __init__(self, graph: "GraphRef", source: "TensorNode", axis: int):
-#         super().__init__(graph)
-#         self.source = source().use()
-#         self.axis = axis
-
-#     @property
-#     def shape(self):
-#         return ()
-
-#     @property
-#     def dtype(self):
-#         return "int32"
-
-
 TensorNode = Union[InternalNode, ConstantNode, PlaceholderNode]
 Node = Union[TensorNode, OperatorNode]
 
@@ -454,6 +428,8 @@ class SubGraph:
     outputs: List[Use]
 
     def __init__(self, graph: Graph, inputs: Sequence[Use], operators: LinkedListView[OperatorNode], outputs: Sequence[Use]) -> None:
+        for input in inputs:
+            assert isinstance(input, (ShapeUse, ValueUse))
         self.graph = graph
         self.inputs = list(inputs)
         self.operators = operators

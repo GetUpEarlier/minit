@@ -83,7 +83,7 @@ def register_elemwise_operator(op_type, op_py, dtype=None):
         c = ScalarTensor(c_item, args[0].shape, output_dtype)
         return (c,)
 
-    @register_dispatch(priority=-1)
+    @register_dispatch(priority=-10)
     def _register_elemwise_meta(op: op_type, *args: Tensor): # type: ignore
         for arg in args:
             assert arg.dtype == args[0].dtype

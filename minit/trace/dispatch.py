@@ -46,7 +46,7 @@ def _dispatch_trace(op: Operator, *args: Union[TraceTensor, Tensor]):
 
 
 def trace_evaluate(builder: GraphBuilder, expression: Expression):
-    args = tuple([trace_evaluate(arg._expression)[arg._index] if isinstance(arg, LazyTensor) else TraceTensor(builder, builder.create_constant(arg), arg) for arg in expression.args])
+    args = tuple([trace_evaluate(builder, arg._expression)[arg._index] if isinstance(arg, LazyTensor) else TraceTensor(builder, builder.create_constant(arg), arg) for arg in expression.args])
     return dispatch(expression.op, *args)
 
 

@@ -12,7 +12,7 @@ def any_lazy(*tys):
     return any(ty in (LazyTensor, ScalarTensor) for ty in tys)
 
 
-def any_lazy_but_some(*tys):
+def any_lazy_but_some(op, *tys):
     return any(ty is LazyTensor for ty in tys) and any(ty not in (ScalarTensor, LazyTensor) for ty in tys)
 
 

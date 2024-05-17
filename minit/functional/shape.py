@@ -1,7 +1,9 @@
 from typing import List, Optional, Tuple
 
+from ..core.scalar import ScalarTensor
+
 from ..core.tensor import Tensor
-from ..core.dispatch import dispatch
+from ..core.dispatch import dispatch, register_dispatch
 from ..operator.shape import AddAxis, Broadcast, Fold, Expand, Reinterpret, RemoveAxis, Transpose
 from .utils import _convert_constant
 
@@ -14,6 +16,9 @@ def fold(x: Tensor, start: int, stop: int) -> Tensor:
 
 
 def expand(x: Tensor, axis: int, sizes: Tuple[Tensor, ...]) -> Tensor:
+    if len(sizes) == 1:
+        # TODO: assertion
+        return x
     sizes = _convert_constant(*sizes)
     (z,) = dispatch(Expand(axis=axis), x, *sizes)
     return z
@@ -35,6 +40,7 @@ def remove_axis(x: Tensor, axis: int) -> Tensor:
 
 def broadcast(x: Tensor, axis: int, size: Tensor) -> Tensor:
     (size,) = _convert_constant(size)
+    assert axis < len(x.shape)
     (z,) = dispatch(Broadcast(axis=axis), x, size)
     return z
 
@@ -61,3 +67,10 @@ def repeat_interleaved(x: Tensor, axis: int, size: Tensor) -> Tensor:
 def reinterpret(x: Tensor, target: str) -> Tensor:
     (z,) = dispatch(Reinterpret(target), x)
     return z
+
+
+@register_dispatch()
+def dispatch_add_axis(op: AddAxis, x: ScalarTensor):
+    shape = x._shape[:op.axis] + (ScalarTensor(1, (), "int32"),) + x._shape[op.axis:]
+    z = ScalarTensor(x._value, shape, x._dtype)
+    return (z,)

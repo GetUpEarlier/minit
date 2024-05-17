@@ -1,4 +1,7 @@
-from ..core.dispatch import dispatch
+from typing import Union
+from ..core.scalar import ScalarTensor
+from ..core.meta import MetaTensor
+from ..core.dispatch import dispatch, register_dispatch
 from ..core.tensor import Tensor
 from ..operator.reduce import Max, Sum
 
@@ -18,3 +21,10 @@ def mean(x: Tensor, axis: int) -> Tensor:
 def max(x: Tensor, axis: int) -> Tensor:
     (z,) = dispatch(Max(axis=axis), x)
     return z
+
+
+@register_dispatch()
+def dispatch_max(op: Union[Max, Sum], x: MetaTensor):
+    shape = x.shape[:op.axis] + (ScalarTensor(1, (), "int32"),) + x.shape[op.axis+1:]
+    z = MetaTensor(shape, x.dtype)
+    return (z,)
