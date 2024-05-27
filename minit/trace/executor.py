@@ -1,6 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, DefaultDict, Dict, List, Optional, Tuple
 import nvtx
 
 from ..core.operator import Operator
@@ -8,7 +8,7 @@ from ..core.operator import Operator
 from ..core.dispatch import dispatch
 
 from ..core.tensor import Tensor
-from ..graph import ConstantNode, NodeRef, OperatorNode, ShapeNode, SubGraph, TensorNode
+from ..graph import ConstantNode, OperatorNode, SubGraph, TensorNode, Use, ValueNode
 
 
 class ValueAndRefCount:
@@ -48,23 +48,24 @@ class ValueAndRefCount:
 
 class TraceGraphExecutor:
     graph: SubGraph
-    value_and_refs: Dict[NodeRef, ValueAndRefCount]
+    value_and_refs: Dict[ValueNode, ValueAndRefCount]
     sequence: List[Tuple[List[Callable[[], Tensor]], Operator, List[Callable[[Tensor], None]]]]
 
-    def make_consumer(self, node_ref: NodeRef[TensorNode]):
-        if node_ref.type is ConstantNode:
-            constant = node_ref().value
-            return lambda: constant
-        elif node_ref.type is ShapeNode:
-            node = node_ref()
-            source = self.value_and_refs[node.source.value]
-            axis = node.axis
+    def make_consumer(self, node_use: Use) -> Callable[[], Tensor]:
+        if node_use.axis is not None:
+            node = node_use.target
+            axis = node_use.axis
+            source = self.value_and_refs[node]
             return lambda: source.shape[axis]
         else:
-            return self.value_and_refs[node_ref].consume
+            if isinstance(node_use.target, ConstantNode):
+                constant = node_use.target.value
+                return lambda: constant
+            else:
+                return self.value_and_refs[node_use.target].consume
 
-    def make_producer(self, node_ref: NodeRef[TensorNode]):
-        value_and_ref = self.value_and_refs.get(node_ref, None)
+    def make_producer(self, node: ValueNode) -> Callable[[Tensor], None]:
+        value_and_ref = self.value_and_refs.get(node, None)
         if value_and_ref is not None:
             return value_and_ref.produce
         else:
@@ -72,38 +73,38 @@ class TraceGraphExecutor:
 
     def __init__(self, graph: SubGraph) -> None:
         self.graph = graph
-        counts = defaultdict(lambda: 0)
-        shapes = {}
+        counts: DefaultDict[ValueNode, int] = defaultdict(lambda: 0)
+        shapes: Dict[ValueNode, Tuple[ValueNode, ...]] = {}
 
-        def record(node_ref):
-            assert isinstance(node_ref, NodeRef)
-            counts[node_ref] += 1
-            node = node_ref()
-            if isinstance(node, ShapeNode):
-                shapes[node.source().ref] = ()
+        def record(node_use: Use):
+            assert isinstance(node_use, Use)
+            node = node_use()
+            counts[node] += 1
+            if node_use.axis is not None:
+                shapes[node] = ()
 
         for operator in graph.operators:
-            for arg in operator().args:
+            for arg in operator.args:
                 record(arg)
         for output in graph.outputs:
-            record(output.value)
-        self.value_and_refs = {
-            node_ref: ValueAndRefCount(ref_count, (node_ref in shapes)) for node_ref, ref_count in counts.items()
+            record(output)
+        self.value_and_refs: Dict[ValueNode, ValueAndRefCount] = {
+            node: ValueAndRefCount(ref_count, (node in shapes)) for node, ref_count in counts.items()
         }
         self.sequence = []
-        for operator_ref in graph.operators:
-            operator: OperatorNode = operator_ref()
+        for operator in graph.operators:
             self.sequence.append((
                 [self.make_consumer(arg) for arg in operator.args],
                 operator.operator,
-                [self.make_producer(node_use.value) for node_use in operator.outputs],
+                [self.make_producer(node) for node in operator.outputs],
             ))
 
     def execute(self, *args: Tensor):
         assert len(args) == len(self.graph.inputs)
 
-        for node_ref, value in zip(self.graph.inputs, args):
-            self.make_producer(node_ref)(value)
+        for node_use, value in zip(self.graph.inputs, args):
+            assert node_use.axis is None
+            self.make_producer(node_use.target)(value)
 
         for operator_inputs, operator, operator_outputs in self.sequence:
             operator_input_values = [operator_input() for operator_input in operator_inputs]
@@ -111,5 +112,8 @@ class TraceGraphExecutor:
             for operator_output, operator_output_value in zip(operator_outputs, operator_output_values):
                 operator_output(operator_output_value)
 
-        outputs = tuple([self.make_consumer(output.value)() for output in self.graph.outputs])
+        outputs = tuple([self.make_consumer(output)() for output in self.graph.outputs])
         return outputs
+
+    def __call__(self, *args: Tensor):
+        return self.execute(*args)

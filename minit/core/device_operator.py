@@ -16,13 +16,3 @@ class DeviceOperator(Operator, Generic[_Operator, _Device]):
 
     def type(self):
         return DeviceOperator[self.operator.type(), Literal[self.device]] # type: ignore
-
-
-@register_dispatch(priority=-2)
-def register_device_dispatch(op: DeviceOperator[Operator, Literal["auto"]], *args: Tensor):
-    return dispatch(op.operator, *args)
-
-
-@register_dispatch(priority=-3)
-def register_device_operator(op: DeviceOperator[Operator, str], *args: Tensor):
-    return dispatch(op.operator, *args)

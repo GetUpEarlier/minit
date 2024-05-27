@@ -1,9 +1,13 @@
 import ctypes
 import math
-from typing import Union
+from typing import Literal, Union
 
+from ..core.object import get_origin_or_self
+
+from ..lazy.tensor import LazyTensor
+from ..core.operator import Operator
+from ..core.device_operator import DeviceOperator
 from .kernel.cuda.cast import generate_cast_kernel
-
 from ..core.shape import to_immediate_shape
 from ..core.scalar import ScalarTensor
 from ..core.tensor import Tensor
@@ -28,7 +32,7 @@ from .kernel.cuda.elemwise import generate_elemwise_kernel
 from ..operator.arith import Add, Constant, Cosine, Divide, Exponential, Power, Multiply, Sine, Subtract, Cast
 from .tensor import CUDATensor
 from ..operator.linalg import BatchMatrixMultiply, MatrixMultiply, TriangleLower, TriangleUpper
-from ..core.dispatch import register_dispatch
+from ..core.dispatch import dispatch, register_dispatch
 from .kernel.cublas import generate_cublas_kernel
 from .kernel.utils import get_cuda_dtype
 
@@ -135,7 +139,8 @@ def register_elemwise_operators():
         (Power, "exp", 2, "{1} == (T)2.0 ? {0} * {0} : {1} == (T)0.5 ? (T)sqrt((float){0}) : {1} == (T)-0.5 ? (T)rsqrt((float){0}) : (T)powf((float){0}, (float){1})", lambda x, y: pow(x, y)),
         (Sine, "sin", 1, "(T)sin((float){0})", lambda x: math.sin(x)),
         (Cosine, "cos", 1, "(T)cos((float){0})", lambda x: math.cos(x)),
-        (Sigmoid, "sigmoid", 1, "{0} > (T)0 ? 1.0 / (1.0 + expf((float)-{0})) : (expf((float){0}) / (1.0 + expf((float){0})))", None),
+        # (Sigmoid, "sigmoid", 1, "{0} > (T)0 ? 1.0 / (1.0 + expf((float)-{0})) : (expf((float){0}) / (1.0 + expf((float){0})))", None),
+        (Sigmoid, "sigmoid", 1, "1.0 / (1.0 + expf((float)-{0}))", None),
         (Exponential, "exp", 1, "expf({0})", lambda x: math.exp(x)),
     ]:
         register_elemwise_operator(op_type, op_name, op_fan_in, op_expression, op_py)
@@ -169,19 +174,19 @@ register_reduce_operators()
 
 
 @register_dispatch()
-def register_fill(op: Fill, *sizes: Tensor):
+def register_fill(op: DeviceOperator[Fill, Literal["cuda"]], value: Tensor, *sizes: Tensor):
     sizes = to_immediate_shape(sizes)
     size = 1
     for dim in sizes:
         size *= dim
-    c = CUDATensor.allocate(tuple(sizes), op.dtype)
-    kernel = generate_fill_kernel("fill", get_cuda_dtype(op.dtype))
-    kernel(None, c.data_ptr, size, op.value)
+    c = CUDATensor.allocate(tuple(sizes), value.dtype)
+    kernel = generate_fill_kernel("fill", get_cuda_dtype(value.dtype))
+    kernel(None, c.data_ptr, size, value.item())
     return (c,)
 
 
 @register_dispatch()
-def register_sequence(op: GenerateSequence, start: Tensor, size: Tensor, step: Tensor):
+def register_sequence(op: DeviceOperator[GenerateSequence, Literal["cuda"]], start: Tensor, size: Tensor, step: Tensor):
     size_value = size.item()
     assert start.dtype == step.dtype
     assert size.dtype == "int32"
@@ -441,6 +446,8 @@ def register_rms_norm_operator(op: RMSNorm, x: CUDATensor, weight: CUDATensor):
 @register_dispatch()
 def register_rope_operator(op: RoPE, x: CUDATensor, freqs_cos: CUDATensor, freqs_sin: CUDATensor):
     bs, seqlen, nh, hs = x._shape
+    assert freqs_cos.dtype == "float32"
+    assert freqs_sin.dtype == "float32"
     z = CUDATensor.allocate(x._shape, x.dtype)
     kernel = generate_rope_kernel("rope", get_cuda_dtype(x.dtype))
     kernel(
@@ -492,3 +499,13 @@ def register_cast_operator(op: Cast, x: CUDATensor): # type: ignore
         size *= dim
     kernel(None, x.data_ptr, c.data_ptr, size)
     return (c,)
+
+
+def instantiate_cuda_predicate(op, *args):
+    return get_origin_or_self(op) is not DeviceOperator and CUDATensor in args and LazyTensor in args
+
+
+@register_dispatch(priority=-1, predicate=instantiate_cuda_predicate)
+def register_instantiate_cuda(op: Operator, *args: Union[CUDATensor, LazyTensor]):
+    args = [arg.instantiate("cuda") if isinstance(arg, LazyTensor) else arg for arg in args]
+    return dispatch(op, *args)

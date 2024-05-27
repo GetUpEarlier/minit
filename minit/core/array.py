@@ -95,6 +95,14 @@ class Array(Generic[_T]):
         from ..functional.arith import divide
         return divide(self, y)
 
+    def floor_divide(self, y: _T):
+        from ..functional.arith import floor_divide
+        return floor_divide(self, y)
+
+    def modulo(self, y: _T):
+        from ..functional.arith import modulo
+        return modulo(self, y)
+
     def power(self, y: _T):
         from ..functional.arith import power
         return power(self, y)
@@ -102,6 +110,10 @@ class Array(Generic[_T]):
     def exponential(self):
         from ..functional.arith import exponential
         return exponential(self)
+
+    def logarithm(self):
+        from ..functional.arith import logarithm
+        return logarithm(self)
 
     def square(self):
         from ..functional.arith import square
@@ -186,6 +198,10 @@ class Array(Generic[_T]):
     __rmul__ = _reversed(multiply)
     __truediv__ = divide
     __rtruediv__ = _reversed(divide)
+    __floordiv__ = floor_divide
+    __rfloordiv__ = _reversed(floor_divide)
+    __mod__ = modulo
+    __rmod__ = _reversed(modulo)
     __pow__ = power
     __rpow__ = _reversed(power)
     __gt__ = greater_than

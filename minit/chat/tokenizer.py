@@ -38,7 +38,7 @@ class HuggingFaceTokenizer(Tokenizer):
         self.hugging_face = transformers.PreTrainedTokenizerFast(tokenizer_file=path)
 
     def tokenize(self, text: str) -> List[int]:
-        input_ids = self.hugging_face(text).input_ids
+        input_ids = self.hugging_face.encode(text, add_special_tokens=False)
         return input_ids
 
     def detokenize(self, ids: List[int]) -> str:

@@ -16,6 +16,7 @@ class ScalarTensor(Tensor):
         super().__init__()
         assert not isinstance(value, Tensor)
         assert shape is not None
+        assert dtype is not None
         self._value = value
         self._shape = shape
         self._dtype = dtype

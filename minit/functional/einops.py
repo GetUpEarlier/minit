@@ -2,6 +2,8 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 import nvtx
 
+from ..core.meta import MetaTensor
+
 from .linalg import batch_matrix_multiply, matrix_multiply
 from ..graph import SubGraph
 from ..core.tensor import Tensor
@@ -187,20 +189,24 @@ def rearrange_impl(input_spec, output_spec, x: Tensor, variables: Dict[str, Tens
     # shuffle axes
     flatten_input_spec = flatten_spec(input_spec)
     flatten_output_spec = flatten_spec(output_spec)
+    assert not isinstance(x, MetaTensor)
     for i, dim in enumerate(flatten_output_spec):
         if dim not in flatten_input_spec:
             flatten_input_spec.insert(i, dim)
             x = x.add_axis(i, variables[dim])
+            assert not isinstance(x, MetaTensor)
         if flatten_input_spec[i] == dim:
             continue
         j = flatten_input_spec.index(dim)
         flatten_input_spec[i], flatten_input_spec[j] = flatten_input_spec[j], flatten_input_spec[i]
         x = x.transpose(i, j)
+        assert not isinstance(x, MetaTensor)
     # fold axes
     for i, dim in enumerate(output_spec):
         if isinstance(dim, list):
             dim: List[str]
             x = x.fold(i, i+len(dim))
+            assert not isinstance(x, MetaTensor)
     return x
 
 

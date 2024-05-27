@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Tuple
 
+from ..core.meta import MetaTensor
 from ..core.device_operator import DeviceOperator
 from ..core.dispatch import dispatch
 from ..core.operator import Operator
@@ -14,8 +15,15 @@ class Expression:
     outputs: Tuple["Tensor", ...]
 
     def evaluate(self, device: str) -> Tuple["Tensor", ...]:
-        args = tuple([arg.instantiate(device) if isinstance(arg, LazyTensor) else arg for arg in self.args])
-        return dispatch(DeviceOperator(self.op, device), *args)
+        any_lazy = any(isinstance(arg, LazyTensor) for arg in self.args)
+        if not any_lazy:
+            outputs = dispatch(DeviceOperator(self.op, device), *self.args)
+        else:
+            args = tuple([arg.instantiate(device) if isinstance(arg, LazyTensor) else arg for arg in self.args])
+            outputs = dispatch(self.op, *args)
+        for output in outputs:
+            assert not isinstance(output, MetaTensor)
+        return outputs
 
 
 class LazyTensor(Tensor):
@@ -37,4 +45,10 @@ class LazyTensor(Tensor):
         return "lazy"
 
     def instantiate(self, device: str):
-        return self._expression.evaluate(device)[self._index]
+        result = self._expression.evaluate(device)[self._index]
+        if device != "meta":
+            assert not isinstance(result, MetaTensor)
+        return result
+    
+    def __repr__(self):
+        return f"LazyTensor{{expression={self._expression}}}"

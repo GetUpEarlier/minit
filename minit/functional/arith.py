@@ -1,8 +1,8 @@
 from numbers import Number
-from typing import Union
+from typing import Optional, Union
 from ..core.tensor import Tensor
 from ..core.dispatch import dispatch
-from ..operator.arith import Add, And, Cast, Constant, Cosine, Equal, Exponential, GreaterThan, Not, Power, Sine, Subtract, Multiply, Divide
+from ..operator.arith import Add, And, Cast, Constant, Cosine, Equal, Exponential, FloorDivide, GreaterThan, Logarithm, Modulo, Not, Power, Select, SelectMax, Sine, Subtract, Multiply, Divide
 from .utils import _broadcast_constant
 
 
@@ -30,6 +30,18 @@ def divide(x: Tensor, y: Tensor):
     return z
 
 
+def floor_divide(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    (z,) = dispatch(FloorDivide(), x, y)
+    return z
+
+
+def modulo(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    (z,) = dispatch(Modulo(), x, y)
+    return z
+
+
 def power(base: Tensor, exponent: Tensor):
     base, exponent = _broadcast_constant(base, exponent)
     (z,) = dispatch(Power(), base, exponent)
@@ -38,6 +50,11 @@ def power(base: Tensor, exponent: Tensor):
 
 def exponential(x: Tensor):
     (z,) = dispatch(Exponential(), x)
+    return z
+
+
+def logarithm(x: Tensor):
+    (z,) = dispatch(Logarithm(), x)
     return z
 
 
@@ -64,10 +81,13 @@ def cosine(x: Tensor):
 def constant(x: Number, dtype: str):
     opr = Constant(value=x, dtype=dtype)
     (z,) = dispatch(opr)
+    assert isinstance(z, Tensor)
     return z
 
 
 def cast(x: Tensor, dtype: str):
+    if x.dtype == dtype:
+        return x
     (z,) = dispatch(Cast(dtype), x)
     return z
 
@@ -118,3 +138,20 @@ def greater_equal(x: Tensor, y: Tensor):
 def less_equal(x: Tensor, y: Tensor):
     x, y = _broadcast_constant(x, y)
     return logical_not(greater_than(x, y))
+
+
+def select_max(x: Tensor, y: Tensor):
+    x, y = _broadcast_constant(x, y)
+    (z,) = dispatch(SelectMax(), x, y)
+    return z
+
+
+def select(index: Tensor, *args: Tensor, dtype: Optional[str]=None):
+    args = _broadcast_constant(*args, shape=index.shape, dtype=dtype)
+    (z,) = dispatch(Select(), index, *args)
+    return z
+
+
+def where(condition: Tensor, true_value: Tensor, false_value: Tensor, *, dtype: Optional[str]=None):
+    assert condition.dtype == "bool"
+    return select(condition, false_value, true_value, dtype=dtype)

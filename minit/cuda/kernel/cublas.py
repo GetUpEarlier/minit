@@ -114,11 +114,13 @@ extern "C" void ${KERNEL_NAME}(cudaStream_t stream, void* a, void* b, void* c, s
         "KERNEL_NAME":  kernel_name,
         "DATA_TYPE": dtype,
         "CUDA_DATA_TYPE": {
+            "double": "CUDA_R_64F",
             "float": "CUDA_R_32F",
             "__half": "CUDA_R_16F",
             "__nv_bfloat16": "CUDA_R_16BF",
         }[dtype],
         "CUDA_COMPUTE_DATA_TYPE": {
+            "double": "CUBLAS_COMPUTE_64F",
             "float": "CUBLAS_COMPUTE_32F",
             "__half": "CUBLAS_COMPUTE_32F",
             "__nv_bfloat16": "CUBLAS_COMPUTE_32F",

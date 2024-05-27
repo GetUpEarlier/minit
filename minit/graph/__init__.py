@@ -42,21 +42,6 @@ class NodeBase:
         self.valid = True
 
 
-# class Use:
-#     value: "ValueNode"
-
-#     def __init__(self, value: "ValueNode") -> None:
-#         assert isinstance(value, ValueNode)
-#         self.value = value
-
-#     def __call__(self):
-#         return self.value
-
-#     def __del__(self):
-#         if self.value.valid:
-#             self.value.uses.remove(weakref.ref(self))
-
-
 class ValueUse:
     target: "ValueNode"
     user: Optional["OperatorNode"]

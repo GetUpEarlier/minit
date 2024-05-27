@@ -14,7 +14,7 @@ class CollectiveSpecSplit(Object, Generic[_Axis]):
     axis: int
 
     def type(self):
-        return CollectiveSpecSplit[Literal[self.axis]]
+        return CollectiveSpecSplit[Literal[self.axis]] # type: ignore
 
 @dataclass(frozen=True)
 class CollectiveSpecPartial(Object):
@@ -31,7 +31,7 @@ class CollectiveSpecUnique(Object, Generic[_Rank]):
     rank: int
 
     def type(self):
-        return CollectiveSpecUnique[Literal[self.rank]]
+        return CollectiveSpecUnique[Literal[self.rank]] # type: ignore
 
 CollectiveSpec = Union[
     CollectiveSpecSplit[int],

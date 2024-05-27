@@ -55,7 +55,7 @@ struct TensorIterator {
     }
 };
 
-__global__ void kernel(T* input, T* freqs_cos, T* freqs_sin, T* output, size_t batch_size, size_t seqlen, size_t nr_heads, size_t head_size) {
+__global__ void kernel(T* input, float* freqs_cos, float* freqs_sin, T* output, size_t batch_size, size_t seqlen, size_t nr_heads, size_t head_size) {
     size_t nr_complexes = batch_size * seqlen * nr_heads * (head_size/2);
     size_t stride = blockDim.x * gridDim.x;
     TensorIterator<4> input_iterator {batch_size, seqlen, nr_heads, head_size/2};
@@ -72,7 +72,7 @@ __global__ void kernel(T* input, T* freqs_cos, T* freqs_sin, T* output, size_t b
     }
 }
 
-extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, T* freqs_cos, T* freqs_sin, T* output, size_t batch_size, size_t seqlen, size_t nr_heads, size_t head_size) {
+extern "C" void ${KERNEL_NAME}(cudaStream_t stream, T* input, float* freqs_cos, float* freqs_sin, T* output, size_t batch_size, size_t seqlen, size_t nr_heads, size_t head_size) {
     size_t nr_complexes = batch_size * seqlen * nr_heads * (head_size/2);
     if (nr_complexes == 0) {
         return;
